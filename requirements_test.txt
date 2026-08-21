@@ -1,0 +1,25 @@
+# Test dependencies for the ekey Home Assistant integration.
+#
+# Install with:  pip install -r requirements_test.txt
+# Run with:      PYTHONPATH=. pytest tests/ha_component -q
+#
+# `homeassistant` is a real dependency of the tests, not an optional extra: the
+# suite imports the actual helpers (Store, DataUpdateCoordinator, websocket_api,
+# panel_custom) so that a rename or signature change in Home Assistant fails here
+# rather than in someone's installation. CI must therefore NOT install it with
+# `|| true`.
+homeassistant>=2026.6.0
+pytest>=8.0
+pytest-asyncio>=0.23
+pytest-cov>=5.0
+
+# Deliberately NOT required:
+#
+#   pytest-homeassistant-custom-component — pulls a large pinned test harness and
+#   ties the suite to one HA version. These are unit tests over a mocked `hass`
+#   plus pure functions, so they do not need the full fixture set.
+#
+#   aioresponses — tests/ha_component/fake_http.py provides the small piece of
+#   aiohttp surface the client actually uses, and records requests so call
+#   ORDER can be asserted (delete-then-verify, for example), which aioresponses
+#   makes awkward.

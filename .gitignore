@@ -1,0 +1,45 @@
+# ============================================================
+# ekey-ha-controller — .gitignore
+# ============================================================
+
+# ---- Python / HA component ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env
+
+# ---- pytest / coverage ----
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.lcov
+
+# ---- mypy / ruff / linting caches ----
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ---- OS artifacts ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- VS Code ----
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+*.code-workspace
+
+# ---- Runtime / log files ----
+*.log

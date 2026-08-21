@@ -1,0 +1,20 @@
+{
+  "domain": "ekey_ha_app",
+  "name": "ekey module App",
+  "codeowners": [
+    "@agrisvi"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/agrisvi/ekey_module_app",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/agrisvi/ekey_module_app/issues",
+  "requirements": [
+    "aiohttp>=3.8.0"
+  ],
+  "version": "1.2.3"
+}

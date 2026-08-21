@@ -1,0 +1,36 @@
+# HACS validation.
+#
+# Separate from ha-component.yml on purpose: that one asks "is this integration
+# correct?" (hassfest, pytest, the panel tests), this one asks "can HACS actually
+# install it?" — repository layout, hacs.json, the manifest fields HACS reads, a
+# description and topics on the GitHub repo. The two fail for different reasons and
+# a green hassfest says nothing about the second.
+#
+# `category: integration` makes it check for custom_components/<domain>/ at the
+# repository root, which is the whole reason this repo exists separately from the
+# HA_dLine_module monorepo: HACS does not look inside subdirectories.
+
+name: HACS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, because this can start failing without anything here changing —
+    # HACS tightens its requirements over time and a repository people install
+    # from should find that out before they do.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: HACS action
+        uses: hacs/action@main
+        with:
+          category: integration

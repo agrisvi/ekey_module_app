@@ -1,0 +1,76 @@
+# Pushes a notification when the scanner grants access.
+#
+# Rewritten because the previous version could not say who it was. It triggered on
+# ekey_fingerprint_matched, which carries the raw APID and nothing else, so the message
+# had to be the fixed string "Welcome home!" — the same text for every person, every
+# time. ekey_access_granted is the same recognition after the integration has resolved
+# the APID to a user, so the name is simply there.
+#
+# The inputs are unchanged apart from additions with defaults, so an automation created
+# from the old version keeps working and just starts saying something useful.
+#
+# Want the entry in Home Assistant's notification list (the bell) instead of on a phone?
+# `notify.persistent_notification` in the field below does reach it. But prefer
+# access_notification_list.yaml for that: it can keep one row that updates instead of a
+# pile that has to be dismissed by hand, which this one cannot express.
+blueprint:
+  name: ekey - Welcome Home Notification
+  description: >
+    Send a notification naming the person when the scanner grants access to a
+    known user. A fingerprint that maps to nobody is ignored.
+  domain: automation
+  input:
+    notify_service:
+      name: Notification Service
+      description: >
+        The service to call, e.g. notify.mobile_app_your_phone. Use
+        notify.persistent_notification to put it in Home Assistant's own
+        notification list instead — though that list is cleared on restart.
+      selector:
+        text:
+    message_template:
+      name: Message
+      description: >
+        Templates are allowed. {{ person }} is the user's name and {{ finger }} the
+        finger number.
+      default: "{{ person }} opened the door"
+      selector:
+        text:
+    scanner_sensor:
+      name: Scanner (optional)
+      description: >
+        Leave empty to react to every scanner. With more than one, pick that
+        scanner's "ekey Scanner Info" sensor to follow only that door.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          integration: ekey_ha_app
+
+variables:
+  scanner: !input scanner_sensor
+
+trigger:
+  - platform: event
+    event_type: ekey_access_granted
+
+condition:
+  # "Unknown" is what the integration reports when the matched fingerprint maps to no
+  # user. Announcing "Unknown opened the door" as a welcome is worse than staying quiet;
+  # use access_notification_list.yaml if you want to be told about those.
+  - condition: template
+    value_template: >-
+      {{ trigger.event.data.person_name not in [none, '', 'Unknown'] }}
+  - condition: template
+    value_template: >-
+      {{ not scanner or trigger.event.data.entity_id == scanner }}
+
+action:
+  - variables:
+      person: "{{ trigger.event.data.person_name }}"
+      finger: "{{ trigger.event.data.finger | default('', true) }}"
+  - service: !input notify_service
+    data:
+      title: Door Access - ekey Scanner
+      # Rendered here rather than in the input, so `person` and `finger` are in scope.
+      message: !input message_template

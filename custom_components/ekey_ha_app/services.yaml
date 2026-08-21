@@ -1,0 +1,82 @@
+enroll_fingerprint:
+  name: Enroll Fingerprint
+  description: Start enrolling a new fingerprint for a person
+  fields:
+    person_id:
+      name: Person ID
+      description: Home Assistant person entity ID (e.g., person.john_doe)
+      required: true
+      example: "person.john_doe"
+      selector:
+        entity:
+          domain: person
+    finger:
+      name: Finger Number
+      description: Finger number (1-10)
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+    scanner:
+      name: Scanner
+      description: Which ekey scanner to enroll on. Required when more than one scanner is configured.
+      required: false
+      selector:
+        device:
+          integration: ekey_ha_app
+
+delete_fingerprint:
+  name: Delete Fingerprint
+  description: Delete an enrolled fingerprint for a person
+  fields:
+    person_id:
+      name: Person ID
+      description: Home Assistant person entity ID (e.g., person.john_doe)
+      required: true
+      example: "person.john_doe"
+      selector:
+        entity:
+          domain: person
+    finger:
+      name: Finger Number
+      description: Finger number (1-10)
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+    scanner:
+      name: Scanner
+      description: Which ekey scanner holds the fingerprint. Required when more than one scanner is configured.
+      required: false
+      selector:
+        device:
+          integration: ekey_ha_app
+
+set_led_brightness:
+  name: Set LED Brightness
+  description: Set the brightness of the scanner LED
+  fields:
+    brightness:
+      name: Brightness
+      description: Brightness level (0-100%)
+      required: true
+      example: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+          mode: slider
+    scanner:
+      name: Scanner
+      description: Which ekey scanner's LED to adjust. Required when more than one scanner is configured.
+      required: false
+      selector:
+        device:
+          integration: ekey_ha_app

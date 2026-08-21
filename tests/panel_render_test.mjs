@@ -1,0 +1,297 @@
+/* Exercise ekey-panel.js's render functions outside a browser.
+ *
+ * The panel is plain ES modules with no build step, which is what makes this possible:
+ * the only DOM it needs to be instantiated is a handful of stubs, and from there the
+ * HTML each state produces can be asserted on directly. No jsdom, no bundler, no
+ * headless browser — `node tests/panel_render_test.mjs` and nothing else.
+ *
+ * What it is for: the enrolment dialog has four states (closed, picking, starting,
+ * live) and two of them are only reachable mid-request, so they are exactly the ones
+ * that rot unnoticed. In particular it pins down that the dialog is an OVERLAY rather
+ * than a card in the page flow, and that it cannot be dismissed out from under a live
+ * enrolment — the scanner would be left waiting for a finger with nothing on screen
+ * saying so.
+ *
+ * Usage:
+ *   node tests/panel_render_test.mjs [file-url-to-ekey-panel.js]
+ */
+import assert from "node:assert";
+
+globalThis.HTMLElement = class {
+  attachShadow() {
+    this.shadowRoot = {
+      childElementCount: 0,
+      append() {},
+      getElementById: () => null,
+      querySelectorAll: () => [],
+    };
+    return this.shadowRoot;
+  }
+};
+globalThis.customElements = {
+  _defined: null,
+  get() { return undefined; },
+  define(name, cls) { this._defined = cls; },
+};
+globalThis.document = {
+  createElement: () => ({}),
+  addEventListener() {},
+  removeEventListener() {},
+};
+
+/* Default to the component's own copy, resolved from this file so the test runs from
+ * any working directory. An explicit argument still wins, for checking a copy. */
+/* new URL(..., import.meta.url) is already a file: URL — going via .pathname and back
+ * through pathToFileURL doubles the drive letter on Windows. */
+const modulePath = process.argv[2]
+  || new URL("../custom_components/ekey_ha_app/www/ekey-panel.js", import.meta.url).href;
+await import(modulePath);
+const Panel = globalThis.customElements._defined;
+assert.ok(Panel, "the element registered itself");
+
+function panel(state) {
+  const p = new Panel();
+  p._data = {
+    users: [
+      { id: "u1", username: "Test", fingers: [{ finger: 7, apid: "a".repeat(32) }] },
+      { id: "u2", username: "Demo", fingers: [] },
+    ],
+    unassigned: [],
+    missing: [],
+    scanner_list_known: true,
+  };
+  Object.assign(p, state);
+  return p;
+}
+
+let pass = 0, fail = 0;
+function check(name, cond) {
+  if (cond) { pass++; console.log("  ok   " + name); }
+  else { fail++; console.log("  FAIL " + name); }
+}
+
+console.log("closed:");
+check("renders nothing", panel({})._renderEnroll() === "");
+
+console.log("picker open:");
+{
+  const html = panel({ _enrollOpen: true })._renderEnroll();
+  check("is an overlay, not a card", html.includes('class="modal"') && html.includes("modal-box"));
+  check("is not rendered as a page card", !html.trimStart().startsWith('<div class="card"'));
+  check("has the dialog role", html.includes('role="dialog"') && html.includes('aria-modal="true"'));
+  check("has the user select", html.includes('id="en-user"'));
+  check("has the finger select", html.includes('id="en-finger"'));
+  check("has Enroll and Cancel", html.includes('id="do-enroll"') && html.includes('id="close-enroll"'));
+  check("marks an occupied slot", html.includes("Finger 7 — occupied"));
+  check("buttons are enabled", !/id="do-enroll" disabled/.test(html));
+  check("backdrop is addressable for the click handler", html.includes('id="enroll-modal"'));
+}
+
+console.log("start request in flight:");
+{
+  const html = panel({ _enrollOpen: true, _enrollStarting: true })._renderEnroll();
+  check("still an overlay", html.includes('class="modal"'));
+  check("Enroll is disabled", html.includes('id="do-enroll" disabled'));
+  check("Cancel is disabled", html.includes('id="close-enroll" disabled'));
+  check("selects are disabled", html.includes('id="en-user" disabled'));
+  check('says "Starting…"', html.includes("Starting…"));
+}
+
+console.log("enrolment live:");
+{
+  const p = panel({
+    _enrollOpen: false,
+    _enroll: { apid: "abc", username: "Test", finger: 1, done: false, message: "Place the finger", templates: 2, tries: 3 },
+  });
+  const html = p._renderEnroll();
+  check("stays an overlay after the picker closes", html.includes('class="modal"'));
+  check("shows progress", html.includes("Place the finger"));
+  check("shows counters", html.includes("Templates collected: 2") && html.includes("tries: 3"));
+  check("offers Cancel enrollment", html.includes('data-cancel-enroll="abc"'));
+  check("does not offer the picker", !html.includes('id="en-user"'));
+}
+
+console.log("enrolment finished:");
+{
+  const html = panel({ _enrollOpen: false, _enroll: { done: true } })._renderEnroll();
+  check("the dialog is gone", html === "");
+}
+
+console.log("escape / backdrop guards:");
+{
+  const open = panel({ _enrollOpen: true });
+  open._render = () => {};
+  open._closeEnroll();
+  check("closes an idle picker", open._enrollOpen === false);
+
+  const starting = panel({ _enrollOpen: true, _enrollStarting: true });
+  starting._render = () => {};
+  starting._closeEnroll();
+  check("refuses while the start request is in flight", starting._enrollOpen === true);
+
+  const live = panel({ _enrollOpen: true, _enroll: { done: false } });
+  live._render = () => {};
+  live._closeEnroll();
+  check("refuses while an enrolment is live", live._enrollOpen === true);
+}
+
+/* The checks above call _renderEnroll() directly. This one goes through _render(),
+   which is what the button actually triggers — a dialog that renders perfectly but is
+   never placed in the page looks exactly like a dialog that was never written. */
+console.log("full _render() path:");
+{
+  const p = panel({ _enrollOpen: true });
+  p._scanners = [{ entry_id: "e1", name: "ekey", loaded: true }];
+  p._entryId = "e1";
+  let html = "";
+  p._body = { set innerHTML(v) { html = v; }, get innerHTML() { return html; } };
+  p._wire = () => {};
+  p._render();
+  check("the overlay reaches the page", html.includes('id="enroll-modal"'));
+  check("the users card is still rendered behind it", html.includes("Users &amp; fingerprints"));
+  check("the overlay is last in the markup",
+        html.lastIndexOf("enroll-modal") > html.lastIndexOf("Users &amp; fingerprints"));
+
+  const closed = panel({});
+  closed._scanners = p._scanners;
+  closed._entryId = "e1";
+  let html2 = "";
+  closed._body = { set innerHTML(v) { html2 = v; }, get innerHTML() { return html2; } };
+  closed._wire = () => {};
+  closed._render();
+  check("no overlay when the dialog is closed", !html2.includes("enroll-modal"));
+  check("the Enroll button is there to open it", html2.includes('id="start-enroll"'));
+}
+
+/* Wiring, not just markup. _wire() looks elements up by id after every render, so an id
+   that gets renamed in the template leaves a button that renders perfectly and does
+   nothing. The stub below only hands back elements whose id is actually present in the
+   HTML that was just written, which is what makes the assertion meaningful. */
+console.log("wiring:");
+{
+  const p = panel({});
+  p._scanners = [{ entry_id: "e1", name: "ekey", loaded: true }];
+  p._entryId = "e1";
+  let html = "";
+  const bound = new Map();
+  p._body = { set innerHTML(v) { html = v; }, get innerHTML() { return html; } };
+  p.shadowRoot.getElementById = (id) => {
+    if (!new RegExp(`id="${id}"`).test(html)) return null;   // not rendered → not bindable
+    return { addEventListener: (ev, fn) => bound.set(`${id}:${ev}`, fn) };
+  };
+  p.shadowRoot.querySelectorAll = () => [];
+  p._render();
+
+  check("Refresh exists in the markup", html.includes('id="reload"'));
+  check("Refresh is bound to a click handler", bound.has("reload:click"));
+  check("Enroll is bound to a click handler", bound.has("start-enroll:click"));
+
+  let loaded = 0;
+  p._load = () => { loaded++; };
+  bound.get("reload:click")();
+  check("clicking Refresh reloads", loaded === 1);
+
+  bound.get("start-enroll:click")();
+  check("clicking Enroll opens the dialog", p._enrollOpen === true);
+}
+
+/* The panel refreshes itself when the backend says something changed. Both messages
+   matter: enrol progress carries the terminal "done", and users_changed covers every
+   other path (a delete, a Home Assistant service call, a second browser tab). */
+console.log("live events:");
+{
+  const p = panel({});
+  let loaded = 0;
+  p._load = () => { loaded++; };
+  p._render = () => {};
+  p._say = () => {};
+
+  p._onEvent({ event_type: "ekey_enroll_progress", data: { done: false, message: "Place the finger" } });
+  check("progress does not reload mid-enrolment", loaded === 0);
+  check("progress is kept for the dialog", p._enroll.message === "Place the finger");
+
+  p._onEvent({ event_type: "ekey_enroll_progress", data: { done: true, ok: true, message: "Enrolled." } });
+  check("a finished enrolment reloads the user list", loaded === 1);
+
+  p._onEvent({ event_type: "ekey_users_changed", data: {} });
+  check("users_changed reloads the user list", loaded === 2);
+
+  p._onEvent({ event_type: "something_else", data: {} });
+  check("an unrelated event does not reload", loaded === 2);
+}
+
+console.log("message placement:");
+{
+  const p = panel({ _enrollOpen: true, _message: { text: "Something failed", kind: "err" } });
+  check("the message is inside the dialog", p._renderEnroll().includes("Something failed"));
+}
+
+/* The serial-port section. Its whole contract is that it renders NOTHING unless the
+ * backend answered, and that the control and the wording come from the reply rather than
+ * from an assumption — a panel that offers to change a port it cannot change, or promises
+ * "no restart needed" to a daemon that is already bound, is worse than one that stays
+ * quiet. Each of the four states below is one deployment we actually ship. */
+console.log("serial port section:");
+{
+  const ports = [
+    { path: "/dev/ttyUSB0", label: "ekey FSX CONVERTER 23180001 (ftdi_sio)", kind: "usb" },
+    { path: "/dev/ttyS0", label: "ttyS0 (serial8250)", kind: "internal", console: true },
+    { path: "/dev/ttyUSB1", label: "other (cp210x)", kind: "usb", busy: true },
+  ];
+
+  check("no reply at all renders nothing", panel({ _serial: null })._renderSerial() === "");
+  check("a reply with no ports renders nothing",
+    panel({ _serial: { ports: [] } })._renderSerial() === "");
+
+  // A standalone daemon that has not bound yet: editable, applies immediately.
+  const unbound = panel({ _serial: {
+    ports, selected: "/dev/ttyUSB0", active: "", source: "file",
+    editable: true, bound: false, applies: "immediately" } })._renderSerial();
+  check("offers the picker when editable", unbound.includes('id="serial-pick"'));
+  check("offers Save when editable", unbound.includes('id="serial-save"'));
+  check("lists internal ports too, not just USB", unbound.includes("/dev/ttyS0"));
+  check("flags the system console", unbound.includes("system console"));
+  check("flags a port in use", unbound.includes("in use"));
+  check("preselects the saved port",
+    /value="\/dev\/ttyUSB0" selected/.test(unbound));
+  check("says no restart is needed while unbound", unbound.includes("no restart needed"));
+  /* Unbound but already chosen must show the CHOICE, not "nothing" — that is the state
+     between saving a port and the retry thread reaching it. */
+  check("shows the saved port even before it is bound", unbound.includes("/dev/ttyUSB0"));
+
+  const nothing = panel({ _serial: {
+    ports, selected: "", active: "", source: "none",
+    editable: true, bound: false, applies: "immediately" } })._renderSerial();
+  check("says 'none chosen yet' only when nothing is chosen at all",
+    nothing.includes("none chosen yet"));
+
+  // The same daemon once it is bound: a change now needs a restart.
+  const bound = panel({ _serial: {
+    ports, selected: "/dev/ttyUSB0", active: "/dev/ttyUSB0", source: "file",
+    editable: true, bound: true, applies: "restart" } })._renderSerial();
+  check("says a restart is needed once bound", bound.includes("restarts"));
+  check("shows the active port", bound.includes("/dev/ttyUSB0"));
+
+  // The add-on: the port comes from its configuration, so no control at all.
+  const pinned = panel({ _serial: {
+    ports, selected: "/dev/ttyUSB0", active: "/dev/ttyUSB0", source: "cli",
+    editable: false, bound: true, applies: "restart" } })._renderSerial();
+  check("no picker when not editable", !pinned.includes('id="serial-pick"'));
+  check("no Save when not editable", !pinned.includes('id="serial-save"'));
+  check("still shows which port is in use", pinned.includes("/dev/ttyUSB0"));
+  check("explains where the port is set instead", pinned.includes("add-on configuration"));
+
+  // A hostile label must not be able to close the option tag.
+  const nasty = panel({ _serial: {
+    ports: [{ path: '/dev/tty"><script>x</script>', label: "<b>x</b>", kind: "usb" }],
+    selected: "", active: "", source: "none", editable: true, bound: false,
+    applies: "immediately" } })._renderSerial();
+  /* The static hint legitimately contains <b>, so the assertion is about the DATA:
+     the injected markup must arrive escaped and no script tag may survive anywhere. */
+  check("escapes a hostile label", nasty.includes("&lt;b&gt;"));
+  check("escapes a hostile path", nasty.includes("&quot;&gt;"));
+  check("no script tag survives", !nasty.includes("<script>"));
+}
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

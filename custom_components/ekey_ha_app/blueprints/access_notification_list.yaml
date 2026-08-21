@@ -1,0 +1,110 @@
+# Writes fingerprint access into Home Assistant's own notification list — the bell in
+# the sidebar — rather than pushing it to a phone.
+#
+# There is no "Notification Service" to fill in here, and that is the point: the bell
+# list is not a notify target, it is the `persistent_notification` integration, and it
+# is called directly. (`notify.persistent_notification` also exists and reaches the
+# same list, but it cannot set a notification_id from a blueprint input cleanly, which
+# is what makes the difference between one row that updates and a growing list.)
+#
+# READ THIS BEFORE USING IT AS AN ACCESS LOG: the notification list lives in memory.
+# Home Assistant keeps it in a plain dict with no Store behind it, so EVERY entry is
+# gone after a restart. It is a good inbox and a poor record. The record already exists
+# in two places that survive a restart: Home Assistant's own logbook (these events carry
+# the scanner's entity, so they show in the device's activity view) and the backend's
+# 100-row event log in the ekey panel, which is not in Home Assistant at all and so
+# survives it being down.
+blueprint:
+  name: ekey - Access in the Notification List
+  description: >
+    Add an entry to Home Assistant's notification list (the bell in the sidebar)
+    when the scanner grants — and optionally when it refuses — access.
+
+    Note that the notification list is cleared when Home Assistant restarts. For a
+    durable record use the logbook, or the Event log in the ekey panel.
+  domain: automation
+  input:
+    one_entry:
+      name: Keep a single entry
+      description: >
+        ON: one notification that is rewritten on every access, so the bell shows
+        the most recent one and nothing accumulates.
+
+        OFF: a new notification per access, which builds a list you can scroll —
+        and which you have to dismiss by hand, one at a time.
+      default: true
+      selector:
+        boolean:
+    include_denied:
+      name: Also record refusals
+      description: >
+        Add an entry when the scanner refuses a finger. These carry no name — an
+        unrecognised finger belongs to nobody — only the reason the scanner gave.
+      default: false
+      selector:
+        boolean:
+    scanner_sensor:
+      name: Scanner (optional)
+      description: >
+        Leave empty to record every scanner. With more than one, pick that
+        scanner's "ekey Scanner Info" sensor to record only that door.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          integration: ekey_ha_app
+
+# !input cannot be used inside a template, so every input a template needs is bound to
+# a variable first. This is the ordinary blueprint idiom, not a workaround.
+variables:
+  single: !input one_entry
+  denied_too: !input include_denied
+  scanner: !input scanner_sensor
+
+trigger:
+  - platform: event
+    event_type: ekey_access_granted
+    id: granted
+  - platform: event
+    event_type: ekey_access_denied
+    id: denied
+
+condition:
+  # Refusals only when asked for. Checked here rather than by leaving the trigger out,
+  # because a blueprint cannot add or remove a trigger from an input.
+  - condition: template
+    value_template: "{{ trigger.id == 'granted' or denied_too }}"
+  # entity_id in the event is the scanner's own info sensor, filled in per scanner, so
+  # this is what makes a two-door installation behave.
+  - condition: template
+    value_template: "{{ not scanner or trigger.event.data.entity_id == scanner }}"
+
+action:
+  - variables:
+      # "Unknown" is what the integration puts here when a matched fingerprint maps to
+      # no user in the list. Worth showing rather than hiding: a finger that opens the
+      # door while belonging to nobody is exactly what somebody wants to notice.
+      who: >-
+        {{ trigger.event.data.person_name | default('Unknown', true)
+           if trigger.id == 'granted' else '' }}
+      finger: "{{ trigger.event.data.finger | default('', true) }}"
+      reason: "{{ trigger.event.data.apfar_desc | default('not recognised', true) }}"
+      line: >-
+        {%- if trigger.id == 'granted' -%}
+        {{ now().strftime('%Y-%m-%d %H:%M:%S') }} — access granted to {{ who }}
+        {{- ' (finger %s)' % finger if finger else '' }}
+        {%- else -%}
+        {{ now().strftime('%Y-%m-%d %H:%M:%S') }} — access refused: {{ reason }}
+        {%- endif -%}
+      # One fixed id rewrites the same row; the event's own context id is unique per
+      # access, which is what turns the bell into a list. Using the context id rather
+      # than a timestamp because two events inside the same second would collide on a
+      # timestamp and one would silently overwrite the other.
+      slot: >-
+        {{ 'ekey_access' if single
+           else 'ekey_access_' ~ trigger.event.context.id }}
+  - service: persistent_notification.create
+    data:
+      title: ekey scanner
+      message: "{{ line }}"
+      notification_id: "{{ slot }}"

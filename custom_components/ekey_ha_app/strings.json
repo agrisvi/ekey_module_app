@@ -1,0 +1,92 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ekey module App",
+        "description": "Choose how Home Assistant reaches the ekey backend.",
+        "menu_options": {
+          "local": "Local — ekey-ha-daemon on this host (HTTP)",
+          "remote": "Remote device — ekey ESP32 (HTTPS + token)"
+        }
+      },
+      "local": {
+        "title": "Local connection (HTTP)",
+        "description": "Connect to a local ekey-ha-daemon over HTTP. A token is only needed if the daemon requires one.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "token": "API token (optional)"
+        }
+      },
+      "remote": {
+        "title": "Remote device (HTTPS)",
+        "description": "Connect to an ekey ESP32 device over HTTPS. Use the bearer token shown on the device's setup page. Leave 'Verify SSL certificate' off for the device's self-signed certificate.",
+        "data": {
+          "host": "Host / IP address",
+          "port": "Port",
+          "token": "API token",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      },
+      "reauth_confirm": {
+        "title": "ekey token no longer accepted",
+        "description": "The backend at {host} rejected the stored API token. This normally means the token was regenerated, or the backend was factory reset. Enter the current token.",
+        "data": {
+          "token": "API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the ekey backend. Please check the host and port.",
+      "invalid_auth": "Authentication failed — check the API token.",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "reauth_successful": "The new token was accepted."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ekey device options",
+        "menu_options": {
+          "wifi_push": "Push Wi-Fi credentials to the device",
+          "wifi_reset": "Reset the device's Wi-Fi (return to setup mode)"
+        }
+      },
+      "wifi_push": {
+        "title": "Push Wi-Fi credentials",
+        "description": "Send new Wi-Fi settings to the ekey device via its /config API. Changing the Wi-Fi network or port reboots the device and may change its address on the network. A wrong password is verified on the device and rolled back automatically.",
+        "data": {
+          "wifi_ssid": "Wi-Fi SSID",
+          "wifi_pass": "Wi-Fi password (leave blank to keep current)",
+          "mdns_host": "mDNS host name",
+          "https_port": "HTTPS port",
+          "reboot_now": "Reboot the device now to apply"
+        }
+      },
+      "wifi_reset": {
+        "title": "Reset device Wi-Fi",
+        "description": "This clears the stored Wi-Fi credentials and reboots the device into its setup portal, where it must be re-provisioned. The scanner pairing and API token are kept.",
+        "data": {
+          "confirm": "Yes, reset Wi-Fi and reboot into setup"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the device.",
+      "invalid_auth": "Authentication failed — check the API token.",
+      "config_failed": "The device rejected the request."
+    },
+    "abort": {
+      "local_no_options": "Wi-Fi configuration is only available for remote ekey devices, not the local daemon."
+    }
+  },
+  "issues": {
+    "retired_entities_referenced": {
+      "title": "Automations still use entities that were removed",
+      "description": "These entities no longer exist: {entities}.\n\nThey were replaced by the **ekey** panel in the sidebar. These automations or scripts still refer to them and cannot run until they are updated: {users}.\n\nIf one of them came from the relay-pulse blueprint, re-import the current blueprint and choose your relay again — its inputs changed, so the old settings do not carry over. Note that updating the integration does **not** update a blueprint you already imported: Home Assistant keeps its own copy under `config/blueprints/automation/`.\n\nThis message clears itself on the next restart once nothing refers to them."
+    }
+  }
+}

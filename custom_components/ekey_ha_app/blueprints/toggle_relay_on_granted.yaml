@@ -1,0 +1,77 @@
+# Rewritten for the app layer.
+#
+# This blueprint used to trigger on sensor.ekey_last_access and parse its state
+# STRING ("Granted: Jane (finger 3)") to recover the person's name, then check that
+# name against the options of select.ekey_enrolled_fingerprints. Both of those were
+# workarounds for not having structured data: the select is gone, and the
+# ekey_access_granted event carries the resolved name directly.
+#
+# If you imported the old version, re-import this one and pick your relay again —
+# the inputs changed.
+blueprint:
+  name: ekey - Relay Pulse on Access Granted
+  description: >
+    Pulse a switch or relay when the scanner grants access to a KNOWN user.
+    An unrecognised finger, or one belonging to nobody in the user list, is
+    ignored.
+
+    This lives in Home Assistant because the relay does: a switch entity is
+    something only Home Assistant can operate. Scanner-side reactions (LED, KNX,
+    MQTT, webhook) belong in the Automations tab of the ekey panel instead — those
+    keep working while Home Assistant is restarting or down.
+  domain: automation
+  input:
+    relay_switch:
+      name: Switch / Relay
+      description: The switch or relay to pulse ON (e.g. Iono Pi Relay 1)
+      selector:
+        entity:
+          domain: switch
+    on_duration:
+      name: ON Duration (seconds)
+      description: How long to keep the relay ON before turning it OFF
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: seconds
+    scanner_sensor:
+      name: Scanner (optional)
+      description: >
+        Leave empty to react to every scanner. With more than one scanner, pick
+        that scanner's "ekey Scanner Info" sensor so this relay only follows the
+        door it belongs to.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          integration: ekey_ha_app
+
+variables:
+  scanner: !input scanner_sensor
+
+trigger:
+  - platform: event
+    event_type: ekey_access_granted
+
+condition:
+  # "Unknown" is what the integration reports when the matched fingerprint maps to
+  # no user, which is exactly the case this automation must not open a door for.
+  - condition: template
+    value_template: >-
+      {{ trigger.event.data.person_name not in [none, '', 'Unknown'] }}
+  # entity_id in the event is the scanner's own info sensor, filled in per scanner.
+  - condition: template
+    value_template: >-
+      {{ not scanner or trigger.event.data.entity_id == scanner }}
+
+action:
+  - service: switch.turn_on
+    target:
+      entity_id: !input relay_switch
+  - delay:
+      seconds: !input on_duration
+  - service: switch.turn_off
+    target:
+      entity_id: !input relay_switch
