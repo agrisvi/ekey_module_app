@@ -35,9 +35,12 @@ fi
 echo "Using config directory: $CONFIG_DIR"
 echo ""
 
-# Find source blueprints
+# Find source blueprints. This script lives in scripts/ at the repository root; the
+# blueprints ship inside the integration, so the path goes back up and across. Only a
+# repository clone has both — HACS installs custom_components/ekey_ha_app/ and nothing
+# else, so a HACS user never sees this script and imports the YAML by hand instead.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SOURCE_DIR="$SCRIPT_DIR/blueprints"
+SOURCE_DIR="$SCRIPT_DIR/../custom_components/ekey_ha_app/blueprints"
 
 if [ ! -d "$SOURCE_DIR" ]; then
     echo "Error: Blueprints directory not found at $SOURCE_DIR"
@@ -118,4 +121,4 @@ echo "2. Go to Settings → Automations & scenes → Blueprints"
 echo "3. Click 'Create automation' on an ekey blueprint"
 echo ""
 echo "Users and fingerprints are managed in the ekey panel in the sidebar,"
-echo "not by a blueprint. See QUICKSTART.md."
+echo "not by a blueprint. See docs/QUICKSTART.md."

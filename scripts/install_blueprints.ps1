@@ -36,9 +36,12 @@ if (-not (Test-Path $ConfigDir)) {
 Write-Host "Using config directory: $ConfigDir" -ForegroundColor Green
 Write-Host ""
 
-# Find source blueprints
+# Find source blueprints. This script lives in scripts/ at the repository root; the
+# blueprints ship inside the integration, so the path goes back up and across. Only a
+# repository clone has both — HACS installs custom_components\ekey_ha_app\ and nothing
+# else, so a HACS user never sees this script and imports the YAML by hand instead.
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceDir = Join-Path $ScriptPath "blueprints"
+$SourceDir = Join-Path $ScriptPath "..\custom_components\ekey_ha_app\blueprints"
 
 if (-not (Test-Path $SourceDir)) {
     Write-Host "Error: Blueprints directory not found at $SourceDir" -ForegroundColor Red
@@ -118,6 +121,6 @@ Write-Host "2. Go to Settings -> Automations & scenes -> Blueprints"
 Write-Host "3. Click 'Create automation' on an ekey blueprint"
 Write-Host ""
 Write-Host "Users and fingerprints are managed in the ekey panel in the sidebar,"
-Write-Host "not by a blueprint. See QUICKSTART.md."
+Write-Host "not by a blueprint. See docs/QUICKSTART.md."
 Write-Host ""
 Read-Host "Press Enter to exit"

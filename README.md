@@ -8,7 +8,7 @@ entities, services and events.
 
 ## Architecture
 
-```
+```text
 ekey module fingerprint scanner
       │  RS485 serial
       ▼
@@ -63,13 +63,28 @@ still fires its actions while Home Assistant is restarting, updating or down.
 
 ## Configuration
 
-1. Go to **Settings** → **Devices & Services** → **Add Integration**
-2. Search for **ekey Home Assistant App**
-3. Enter the daemon host and port (default: `localhost`, `8080`)
-4. Click **Submit** — the integration validates the connection before saving
+Go to **Settings** → **Devices & Services** → **Add Integration** and search for
+**ekey module App**. The first screen asks how Home Assistant reaches the backend,
+and that choice decides what it asks next:
 
-Supply the **API token** as well. It is optional for a local daemon's `/api/v1`, but
-required for user management: see the panel below.
+| Choice | Use it for | Fields |
+| --- | --- | --- |
+| **Local — ekey-ha-daemon on this host (HTTP)** | the add-on, or a daemon on the same machine | Host (default `127.0.0.1`), Port (default `8080`), API token (optional) |
+| **Remote device — ekey ESP32 (HTTPS + token)** | a scanner reached over the network | Host / IP, Port, API token (required), Verify SSL certificate — leave **off** for the device's self-signed certificate |
+
+**Submit** validates the connection before the entry is saved, so a wrong host or a
+rejected token fails here rather than silently later.
+
+Supply the **API token** even on a local install unless you have no use for the panel.
+It is optional for a local daemon's `/api/v1`, but required for user management: see
+the panel below.
+
+If the backend later rejects the stored token, the integration asks for a new one
+through a reauth notice rather than failing silently.
+
+An ESP32 entry also gets a **Configure** button, which can push new Wi-Fi credentials
+to the device or reset it back into its setup portal. A local daemon entry has nothing
+to configure there and says so.
 
 ---
 
@@ -169,42 +184,57 @@ HA **Logbook** as `ekey Access — Access GRANTED: <name> (finger <n>)` and
 
 Prefer `ekey_access_granted` over watching `sensor.ekey_last_access`: the event
 carries the resolved name as a field, where the sensor only has it inside a string.
+A single touch fires several of these in order — touch, then matched/not-matched, then
+the resolved granted/denied — so triggering one reaction on more than one of them runs
+it twice.
+
+Three further events fire around enrolment and deletion — `ekey_enrollment_started`,
+`ekey_enrollment_complete` and `ekey_fingerprint_deleted`. See
+[the component README](custom_components/ekey_ha_app/README.md#events) for their
+fields.
 
 ---
 
 ## Blueprints
 
-Two automation blueprints, in
+Three automation blueprints, in
 [`custom_components/ekey_ha_app/blueprints/`](custom_components/ekey_ha_app/blueprints/):
 
 | Blueprint | Description |
 | --- | --- |
 | `toggle_relay_on_granted.yaml` | Pulse an HA switch or relay when a known user is granted access |
-| `welcome_notification.yaml` | Send a notification on access |
+| `welcome_notification.yaml` | Push a notification naming the person, to any `notify.*` service |
+| `access_notification_list.yaml` | Add an entry to Home Assistant's own notification list (the bell), optionally including refusals |
 
-Both operate a **Home Assistant** entity, which is the one thing the backend cannot
-do. Everything that only involves the scanner — LED, KNX, MQTT, a webhook — should
+All three operate a **Home Assistant** entity, which is the one thing the backend
+cannot do. Everything that only involves the scanner — LED, KNX, MQTT, a webhook — should
 be an action on the backend instead, configured in the **Actions** and
 **Automations** tabs of its Admin page. Those rules run on the scanner or daemon, so
 they keep firing while Home Assistant is restarting, updating or down.
 
 The enrol and delete *script* blueprints are gone: that is what the panel does now.
 
-See [`custom_components/ekey_ha_app/blueprints/README.md`](custom_components/ekey_ha_app/blueprints/README.md)
-for import instructions.
+Home Assistant does not load blueprints from `custom_components/`, so each has to be
+copied into `config/blueprints/automation/ekey/` once — paste the YAML under
+**Settings** → **Automations & scenes** → **Blueprints** → **Import Blueprint**. From
+a clone of this repository, [`scripts/install_blueprints.sh`](scripts/install_blueprints.sh)
+(or `.ps1` on Windows) does all three at once; that script sits outside
+`custom_components/`, so it is not part of a HACS install. See
+[`custom_components/ekey_ha_app/blueprints/README.md`](custom_components/ekey_ha_app/blueprints/README.md)
+and [`scripts/INSTALL_BLUEPRINTS.md`](scripts/INSTALL_BLUEPRINTS.md).
 
 ---
 
 ## Quick start
 
-See [`custom_components/ekey_ha_app/QUICKSTART.md`](custom_components/ekey_ha_app/QUICKSTART.md)
+See [`custom_components/ekey_ha_app/docs/QUICKSTART.md`](custom_components/ekey_ha_app/docs/QUICKSTART.md)
 for a step-by-step setup guide.
 
 ---
 
 ## Automation Examples
 
-See [`custom_components/ekey_ha_app/AUTOMATION_EXAMPLES.md`](custom_components/ekey_ha_app/AUTOMATION_EXAMPLES.md)
+See [`custom_components/ekey_ha_app/docs/AUTOMATION_EXAMPLES.md`](custom_components/ekey_ha_app/docs/AUTOMATION_EXAMPLES.md)
 for a comprehensive set of copy-paste automation examples covering:
 
 - Fingerprint match / no-match handling
@@ -217,6 +247,23 @@ for a comprehensive set of copy-paste automation examples covering:
 ---
 
 ## Development
+
+### Repository layout
+
+```text
+custom_components/ekey_ha_app/   ← everything HACS installs, and nothing else
+├── blueprints/                  three automation blueprints + their README
+├── docs/                        QUICKSTART.md, AUTOMATION_EXAMPLES.md
+├── translations/, www/          strings and the sidebar panel's JS
+└── *.py                         the integration
+scripts/                         install_blueprints.sh / .ps1 — clone-only tooling
+tests/                           pytest suite + the Node panel render test
+```
+
+The split matters: HACS downloads the contents of `custom_components/ekey_ha_app/`
+only, so anything a user needs at runtime has to live inside it, and anything that is
+maintainer tooling should not. That is why the blueprints ship with the integration
+but the scripts that copy them do not.
 
 ### Running tests locally
 

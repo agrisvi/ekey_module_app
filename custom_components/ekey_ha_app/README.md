@@ -18,14 +18,41 @@ events your automations trigger on.
 
 ## Installation
 
-1. Copy the `ekey_ha_app` folder to `custom_components/` in your HA config directory
-2. Restart Home Assistant
+1. Install through HACS, or copy the `ekey_ha_app` folder to `custom_components/` in
+   your HA config directory
+2. Restart Home Assistant — a custom integration is only discovered at startup
 3. Go to **Settings** → **Devices & Services** → **Add Integration**
-4. Search for **ekey Home Assistant App**
-5. Enter the daemon host and port (default: `localhost`, `8080`)
+4. Search for **ekey module App**
+5. Choose how Home Assistant reaches the backend:
 
-A token is required for the panel. On a daemon install it is in
+| Choice | Use it for | Fields |
+| --- | --- | --- |
+| **Local — ekey-ha-daemon on this host (HTTP)** | the add-on, or a daemon on the same machine | Host (default `127.0.0.1`), Port (default `8080`), API token (optional) |
+| **Remote device — ekey ESP32 (HTTPS + token)** | a scanner reached over the network | Host / IP, Port, API token (required), Verify SSL certificate (leave **off** for the device's self-signed certificate) |
+
+The connection is validated before the entry is saved.
+
+A token is optional for a local daemon's `/api/v1` but **required for the panel** —
+without one the user list cannot be read. On a daemon install it is in
 `/etc/ekey/app/token`; on an ESP32 install the device's Admin page shows it.
+
+If the backend later rejects the stored token — it was regenerated, or the backend was
+factory reset — the integration raises a **reauth** notice titled *"ekey token no
+longer accepted"*. Entering the current token there is the whole fix; the entry is
+otherwise untouched.
+
+## Device options (ESP32 only)
+
+**Configure** on the integration entry offers two things, both talking to the device's
+`/config` API:
+
+| Option | What it does |
+| --- | --- |
+| **Push Wi-Fi credentials to the device** | Sets SSID, password, mDNS host name and HTTPS port, optionally rebooting to apply. Current values are pre-filled from the device; a blank password keeps the stored one. A wrong password is verified on the device and rolled back automatically. Changing the network or the port reboots the device and may change its address |
+| **Reset the device's Wi-Fi (return to setup mode)** | Clears the stored credentials and reboots into the setup portal for re-provisioning. The scanner pairing and API token are kept |
+
+A **local daemon** entry aborts with *"Wi-Fi configuration is only available for remote
+ekey devices"* — the daemon has no `/config` API.
 
 ## The ekey panel
 
@@ -109,6 +136,24 @@ resolved name and the scanner as fields and need no string parsing.
 automation on a multi-scanner install. Match and no-match events are recorded in
 the HA **Logbook** automatically.
 
+A single touch fires several of these in order — `ekey_finger_touch`, then
+`ekey_fingerprint_matched` / `_not_matched`, then the resolved `ekey_access_granted` /
+`ekey_access_denied`. Triggering the same reaction on more than one of them runs it
+twice.
+
+Three further events are fired around enrolment and deletion. They exist mainly for
+the panel, but nothing stops an automation using them:
+
+| Event | Key data fields | Description |
+| --- | --- | --- |
+| `ekey_enrollment_started` | `person_id`, `person_name`, `finger`, `apid`, `status` | The `enroll_fingerprint` service accepted a request |
+| `ekey_enrollment_complete` | `apid`, `success` — plus `entryc`/`ennumtpl` when it succeeded, `state`/`enstat` when it failed | Enrolment ended. Trigger on this rather than filtering `ekey_enrollment_state` by code |
+| `ekey_fingerprint_deleted` | `person_id`, `finger`, `apid` | The `delete_fingerprint` service removed one |
+
+`ekey_ha_storage_updated`, `ekey_flash_green_led` and `ekey_flash_red_led` are also on
+the bus, but they are internal plumbing between this integration's own modules — treat
+them as private and do not build on them.
+
 ## Services
 
 ### `ekey_ha_app.enroll_fingerprint`
@@ -143,18 +188,22 @@ data:
 
 ## Blueprints
 
-Two automation blueprints, in the `blueprints/` subdirectory. Both do something
+Three automation blueprints, in the `blueprints/` subdirectory. All three do something
 the backend cannot: operate a Home Assistant entity.
 
 | Blueprint | Description |
 | --- | --- |
 | `toggle_relay_on_granted.yaml` | Pulse an HA switch or relay when a known user is granted access |
 | `welcome_notification.yaml` | Push a notification naming the person, to a phone or any `notify.*` service |
-| `access_notification_list.yaml` | Add an entry to Home Assistant's own notification list (the bell), optionally including refusals. Note that list is cleared on restart — the logbook and the panel's Event log are the durable records |
+| `access_notification_list.yaml` | Add an entry to Home Assistant's own notification list (the bell), optionally including refusals. Note that list is cleared on restart — the logbook and the backend's own access log are the durable records |
 
-Install with `./install_blueprints.sh` (`.\install_blueprints.ps1` on Windows), or
-import the YAML under **Settings** → **Automations & scenes** → **Blueprints**.
-See `blueprints/README.md`.
+Home Assistant does not load blueprints from `custom_components/`, so each has to be
+copied into `config/blueprints/automation/ekey/` once. The reliable route on any
+install is **Settings** → **Automations & scenes** → **Blueprints** → **Import
+Blueprint** → paste the YAML. From a clone of the repository,
+`scripts/install_blueprints.sh` (`.ps1` on Windows) does all three at once — that
+script is not part of a HACS install. See
+[`blueprints/README.md`](blueprints/README.md).
 
 ## Removed in the app-layer version
 
@@ -203,6 +252,15 @@ using the old version.
 
 Users, actions, automations and the access log are stored and executed on the
 backend, so they keep working while Home Assistant is down.
+
+## Further documentation
+
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — step-by-step setup, from adding the
+  integration to enrolling the first finger
+- [`docs/AUTOMATION_EXAMPLES.md`](docs/AUTOMATION_EXAMPLES.md) — copy-paste
+  automations built on the events above
+- [`blueprints/README.md`](blueprints/README.md) — what each blueprint does, its
+  inputs, and how to import it
 
 ## Support
 

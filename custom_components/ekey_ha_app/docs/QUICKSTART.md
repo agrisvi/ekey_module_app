@@ -1,4 +1,4 @@
-# Quick Start Guide — ekey Home Assistant App
+# Quick Start Guide — ekey module App
 
 **Tested with:** Home Assistant Container | Core 2026.4.4 | Frontend 20260325.8
 
@@ -10,9 +10,26 @@ helper entities it needed are gone.
 
 ## Step 1: Integration setup
 
-Add the integration (**Settings** → **Devices & Services** → **Add Integration** →
-*ekey Home Assistant App*), give it the backend host, port and token, and you are
-done. Two things appear:
+**Settings** → **Devices & Services** → **Add Integration**, and search for
+**ekey module App** — that is the name the integration registers, so searching for
+"ekey" is the reliable way to find it.
+
+The first screen asks *how* Home Assistant reaches the backend, and the answer
+changes what it asks next:
+
+| Choice | Use it for | Fields |
+| --- | --- | --- |
+| **Local — ekey-ha-daemon on this host (HTTP)** | the add-on, or a daemon on the same machine | Host (default `127.0.0.1`), Port (default `8080`), API token — **optional** here |
+| **Remote device — ekey ESP32 (HTTPS + token)** | a scanner on the network | Host / IP, Port, API token — **required**, and *Verify SSL certificate*, which you leave **off** for the device's self-signed certificate |
+
+The connection is validated before the entry is saved, so a wrong host or a rejected
+token fails here rather than silently later.
+
+A token is optional for a local daemon's `/api/v1`, but the **panel needs one** —
+without it the user list cannot be read. Supply it even on a local install unless you
+have no use for the panel.
+
+Then two things appear:
 
 **ekey** in the sidebar — the panel, visible to admin users.
 
@@ -105,11 +122,18 @@ Decide *where* each reaction belongs. This is the one design choice worth a minu
 | Scanner LED, KNX, MQTT, webhook | the backend's **Admin** page → Actions + Automations | Runs on the scanner or daemon, so it works while Home Assistant is restarting, updating or down |
 | A Home Assistant switch or relay | `toggle_relay_on_granted.yaml` blueprint here | Only Home Assistant can operate an HA entity |
 | A phone notification | `welcome_notification.yaml` blueprint here | Same |
-| An entry in HA's notification list (the bell) | `access_notification_list.yaml` blueprint here | Same — and it can record refusals too. That list is cleared on restart, so for a durable record use the logbook or the panel's Event log |
+| An entry in HA's notification list (the bell) | `access_notification_list.yaml` blueprint here | Same — and it can record refusals too. That list is cleared on restart, so for a durable record use the logbook or the backend's own access log |
 
-Install the blueprints with `./install_blueprints.sh`
-(`.\install_blueprints.ps1` on Windows), then create automations from them under
-**Settings** → **Automations & scenes** → **Blueprints**.
+The three blueprints ship inside the integration, at
+`config/custom_components/ekey_ha_app/blueprints/`, but Home Assistant does not load
+them from there. Copy each one in through **Settings** → **Automations & scenes** →
+**Blueprints** → **Import Blueprint** → paste the YAML → **Preview** → **Import**.
+(From a clone of the repository, `scripts/install_blueprints.sh` — or `.ps1` on
+Windows — does all three at once; a HACS install does not include that script.)
+
+Then create automations from them under **Settings** → **Automations & scenes** →
+**Blueprints**. Full descriptions and inputs are in
+[`../blueprints/README.md`](../blueprints/README.md).
 
 Note that green-on-match and red-on-mismatch LED feedback is **already built in**;
 you only need a backend `led` action if you want it to keep working with Home
@@ -137,6 +161,22 @@ Home Assistant, then hard-reload the page.
 - Clean the sensor surface and your finger before starting
 - Hold still during each scan
 - If it fails repeatedly, close the dialog and start a fresh session
+
+### Home Assistant asks for the token again
+
+A repair notice titled *"ekey token no longer accepted"* means the backend rejected
+the stored token — normally because it was regenerated, or the backend was factory
+reset. Click through it and enter the current token; nothing else about the entry
+changes and no re-setup is needed.
+
+### An automation shows *"Unknown entity selected"*
+
+It refers to one of the entities removed in the app-layer version — usually
+`select.ekey_enrolled_fingerprints`, from an automation built on the old relay-pulse
+blueprint. The integration raises a repair notice naming both the entity and the
+automation. Re-import the current blueprint and recreate the automation; updating the
+integration does **not** update a blueprint you already imported. See
+[`../blueprints/README.md`](../blueprints/README.md).
 
 ### A person is missing from **Linked person**
 
@@ -166,13 +206,34 @@ The panel is not the only route. From **Developer Tools** → **Actions**:
 4. Place finger on scanner when prompted; progress arrives as notifications
 
 `ekey_ha_app.delete_fingerprint` and `ekey_ha_app.set_led_brightness` work the same
-way. See `README.md` for their parameters.
+way. See [`../README.md`](../README.md) for their parameters. Those three are the
+only services this integration registers.
+
+---
+
+## Advanced: device options (ESP32 only)
+
+The **Configure** button on the integration entry (**Settings** → **Devices &
+Services** → *ekey module App* → **Configure**) offers two things:
+
+- **Push Wi-Fi credentials to the device** — set the SSID, optionally the password,
+  the mDNS host name and the HTTPS port, and optionally reboot to apply. The current
+  values are pre-filled from the device. Leave the password blank to keep the stored
+  one. A wrong password is caught on the device and rolled back automatically, but
+  changing the network or the port reboots the device and may change its address.
+- **Reset the device's Wi-Fi (return to setup mode)** — clears the stored credentials
+  and reboots into the setup portal for re-provisioning. The scanner pairing and the
+  API token are kept.
+
+On a **local daemon** entry, **Configure** reports that there is nothing to configure:
+the daemon has no `/config` API and its settings are its own.
 
 ---
 
 ## Next steps
 
-- `AUTOMATION_EXAMPLES.md` — copy-paste automations built on the ekey events
-- `blueprints/README.md` — the two included blueprints and what belongs on the
-  backend instead
-- `README.md` — the complete entity, service and event reference
+- [`AUTOMATION_EXAMPLES.md`](AUTOMATION_EXAMPLES.md) — copy-paste automations built on
+  the ekey events
+- [`../blueprints/README.md`](../blueprints/README.md) — the three included blueprints
+  and what belongs on the backend instead
+- [`../README.md`](../README.md) — the complete entity, service and event reference

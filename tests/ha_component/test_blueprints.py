@@ -24,8 +24,12 @@ from homeassistant.components.automation.config import AUTOMATION_BLUEPRINT_SCHE
 from homeassistant.components.blueprint.models import Blueprint
 from homeassistant.util import yaml as yaml_util
 
-COMPONENT = Path(__file__).resolve().parents[2] / "custom_components" / "ekey_ha_app"
+REPO = Path(__file__).resolve().parents[2]
+COMPONENT = REPO / "custom_components" / "ekey_ha_app"
 BLUEPRINT_DIR = COMPONENT / "blueprints"
+# The installers live outside the integration: they are a repository-clone tool, and
+# HACS ships only what is under custom_components/.
+SCRIPTS = REPO / "scripts"
 
 BLUEPRINT_FILES = sorted(BLUEPRINT_DIR.glob("*.yaml"))
 
@@ -78,12 +82,12 @@ def test_both_installers_copy_every_blueprint():
     """
     names = {path.name for path in BLUEPRINT_FILES}
 
-    sh = (COMPONENT / "install_blueprints.sh").read_text(encoding="utf-8")
+    sh = (SCRIPTS / "install_blueprints.sh").read_text(encoding="utf-8")
     sh_list = re.search(r'^BLUEPRINTS="([^"]*)"', sh, re.MULTILINE)
     assert sh_list, "could not find the BLUEPRINTS list in install_blueprints.sh"
     assert set(sh_list.group(1).split()) == names
 
-    ps1 = (COMPONENT / "install_blueprints.ps1").read_text(encoding="utf-8")
+    ps1 = (SCRIPTS / "install_blueprints.ps1").read_text(encoding="utf-8")
     ps1_list = re.search(r"^\$Blueprints = @\((.*)\)", ps1, re.MULTILINE)
     assert ps1_list, "could not find the $Blueprints list in install_blueprints.ps1"
     assert set(re.findall(r'"([^"]+)"', ps1_list.group(1))) == names

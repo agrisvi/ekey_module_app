@@ -1,6 +1,6 @@
 # ekey Home Assistant Automation Examples
 
-This document provides example automations for the ekey Home Assistant App integration.
+This document provides example automations for the **ekey module App** integration.
 
 ## Where things belong
 
@@ -19,23 +19,40 @@ Home Assistant can reach.
 
 ## Blueprints
 
-Two, both in `custom_components/ekey_ha_app/blueprints/`:
+Three, all in `custom_components/ekey_ha_app/blueprints/`:
 
 1. **toggle_relay_on_granted.yaml** — pulse an HA switch or relay when a known user
    is granted access
-2. **welcome_notification.yaml** — send a notification on access
+2. **welcome_notification.yaml** — push a notification naming the person, to any
+   `notify.*` service
+3. **access_notification_list.yaml** — add an entry to Home Assistant's own
+   notification list (the bell), optionally including refusals
 
-Install them with `./install_blueprints.sh` (`.\install_blueprints.ps1` on
-Windows), or paste the YAML under **Settings** → **Automations & scenes** →
-**Blueprints** → **Import Blueprint**. See `blueprints/README.md`.
+Home Assistant does not load blueprints from `custom_components/`, so each has to be
+copied in once: **Settings** → **Automations & scenes** → **Blueprints** → **Import
+Blueprint** → paste the YAML. From a clone of the repository,
+`scripts/install_blueprints.sh` (`.\scripts\install_blueprints.ps1` on Windows) does
+all three; a HACS install does not include that script. See
+[`../blueprints/README.md`](../blueprints/README.md).
 
 Everything else in this document is copy-paste YAML you write yourself.
+
+## Which event to trigger on
+
+Most of the examples below use `ekey_access_granted` and `ekey_access_denied`. Those
+are the *resolved* events: the integration has already turned the scanner's raw APID
+into a user, so `trigger.event.data.person_name` and `.finger` are simply there.
+
+`ekey_fingerprint_matched` / `ekey_fingerprint_not_matched` are the raw scanner events
+that precede them. Use those only when you genuinely want the APID or the `apfar`
+reason code — a welcome message built on them cannot name anybody.
 
 ---
 
 ## Managing Fingerprints
 
-Enrolment, deletion and assignment are done in the panel — see `QUICKSTART.md`.
+Enrolment, deletion and assignment are done in the panel — see
+[`QUICKSTART.md`](QUICKSTART.md).
 The services below exist for scripted use.
 
 ### Manual enrollment (service call)
@@ -101,19 +118,38 @@ automation:
   - alias: "ekey: Welcome Home"
     trigger:
       - platform: event
-        event_type: ekey_fingerprint_matched
+        event_type: ekey_access_granted
     action:
       - service: notify.mobile_app_phone
         data:
-          message: "Welcome home!"
+          message: "Welcome home, {{ trigger.event.data.person_name }}!"
           title: "Door Access"
 ```
+
+`welcome_notification.yaml` is this automation as a blueprint, with the message and
+the scanner as configurable inputs — use that unless you want to hand-edit the YAML.
 
 ### Door access denied alert
 
 ```yaml
 automation:
   - alias: "ekey: Access Denied Alert"
+    trigger:
+      - platform: event
+        event_type: ekey_access_denied
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          message: "Door access denied — {{ trigger.event.data.apfar_desc }}"
+          title: "Security Alert"
+```
+
+To narrow it to one reason, trigger on the raw event instead — only that one carries
+the numeric code:
+
+```yaml
+automation:
+  - alias: "ekey: Poor Quality Scan"
     trigger:
       - platform: event
         event_type: ekey_fingerprint_not_matched
@@ -129,30 +165,40 @@ automation:
 
 ### Log all access attempts
 
+Both access events are **already** written to the Home Assistant logbook by the
+integration, as `ekey Access — Access GRANTED: <name> (finger <n>)` and
+`ekey Access — Access DENIED: <reason>`. You only need an automation like this one to
+log something different:
+
 ```yaml
 automation:
   - alias: "ekey: Log Access Attempts"
     trigger:
       - platform: event
-        event_type: ekey_fingerprint_matched
+        event_type: ekey_access_granted
       - platform: event
-        event_type: ekey_fingerprint_not_matched
+        event_type: ekey_access_denied
     action:
       - service: logbook.log
         data:
           name: ekey Scanner
           message: >
-            {% if trigger.event.event_type == 'ekey_fingerprint_matched' %}
-              Fingerprint matched: {{ trigger.event.data.apid }}
+            {% if trigger.event.event_type == 'ekey_access_granted' %}
+              Access granted: {{ trigger.event.data.person_name }}
+              (finger {{ trigger.event.data.finger }})
             {% else %}
-              Fingerprint not matched: {{ trigger.event.data.apfar_desc }}
+              Access denied: {{ trigger.event.data.apfar_desc }}
             {% endif %}
+```
 
+### Turn on lights on a successful scan
+
+```yaml
 automation:
   - alias: "ekey: Turn on lights on successful scan"
     trigger:
       - platform: event
-        event_type: ekey_fingerprint_matched
+        event_type: ekey_access_granted
     action:
       - service: light.turn_on
         target:
@@ -166,23 +212,18 @@ automation:
 
 ## Enrollment Workflow
 
-### Automatic enrollment confirmation
+Enrolment is driven from the panel's **Enroll fingerprint** dialog, which shows the
+progress below live and needs no automation. The events are here for the cases the
+dialog cannot cover — announcing a result on a speaker, or logging every attempt.
 
-```yaml
-automation:
-  - alias: "ekey: Auto-confirm Enrollment"
-    trigger:
-      - platform: event
-        event_type: ekey_enrollment_state
-    condition:
-      - condition: template
-        value_template: "{{ trigger.event.data.enstat == 35 }}"  # wait_for_confirmation
-    action:
-      - service: ekey_ha_app.confirm_enrollment
-        data:
-          apid: "{{ trigger.event.data.apid }}"
-          finger: "{{ trigger.event.data.id }}"
-```
+There is **no** `confirm_enrollment` service: `enstat == 35`
+(*wait_for_confirmation*) is confirmed by the panel session that started the
+enrolment, or by the backend itself. The three services this integration registers are
+`enroll_fingerprint`, `delete_fingerprint` and `set_led_brightness`, and nothing else.
+
+The examples below filter `ekey_enrollment_state` by its numeric `enstat`, which is
+the raw progress stream. If you only care whether it worked, `ekey_enrollment_complete`
+fires once at the end with a plain `success` boolean and is the easier trigger.
 
 ### Enrollment success notification
 
@@ -302,41 +343,56 @@ automation:
 
 ### Person-specific welcome
 
+The integration resolves the fingerprint to a user before firing
+`ekey_access_granted`, so the name needs no lookup — it is a field on the event. An
+unrecognised fingerprint arrives as `Unknown`.
+
 ```yaml
 automation:
   - alias: "ekey: Person-Specific Welcome"
     trigger:
       - platform: event
-        event_type: ekey_fingerprint_matched
+        event_type: ekey_access_granted
+    condition:
+      - condition: template
+        value_template: "{{ trigger.event.data.person_name != 'Unknown' }}"
     action:
-      - service: script.welcome_home
-        data:
-          apid: "{{ trigger.event.data.apid }}"
-
-script:
-  welcome_home:
-    sequence:
-      - variables:
-          person_name: >
-            {% set apid = apid %}
-            {% set ns = namespace(found='Guest') %}
-            {% for person in states.person %}
-              {# Check if this person has this fingerprint registered #}
-              {% if state_attr('sensor.ekey_enrolled_fingerprints', 'fingerprints') %}
-                {% for fp in state_attr('sensor.ekey_enrolled_fingerprints', 'fingerprints') %}
-                  {% if fp.apid == apid %}
-                    {% set ns.found = person.name %}
-                  {% endif %}
-                {% endfor %}
-              {% endif %}
-            {% endfor %}
-            {{ ns.found }}
       - service: tts.google_translate_say
         target:
           entity_id: media_player.home_speaker
         data:
-          message: "Welcome home, {{ person_name }}!"
+          message: "Welcome home, {{ trigger.event.data.person_name }}!"
 ```
+
+### Do something different per person
+
+```yaml
+automation:
+  - alias: "ekey: Per-Person Scene"
+    trigger:
+      - platform: event
+        event_type: ekey_access_granted
+    action:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.person_name == 'Jane' }}"
+            sequence:
+              - service: scene.turn_on
+                target:
+                  entity_id: scene.jane_evening
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.person_name == 'John' }}"
+            sequence:
+              - service: scene.turn_on
+                target:
+                  entity_id: scene.john_evening
+```
+
+The name is the **user name on the backend**, set in the panel. Linking a user to a
+Home Assistant `person` entity does not change it — that link is what lets you reach
+the person's own attributes if you need them.
 
 ---
 
@@ -375,12 +431,12 @@ automation:
         target:
           entity_id: button.ekey_led_green
 
-      # Wait for match result (max 5 seconds)
+      # Wait for the resolved result (max 5 seconds)
       - wait_for_trigger:
           - platform: event
-            event_type: ekey_fingerprint_matched
+            event_type: ekey_access_granted
           - platform: event
-            event_type: ekey_fingerprint_not_matched
+            event_type: ekey_access_denied
         timeout: 5
 
       # Handle result
@@ -388,7 +444,7 @@ automation:
           # Match successful - open door
           - conditions:
               - condition: template
-                value_template: "{{ wait.trigger.event.event_type == 'ekey_fingerprint_matched' }}"
+                value_template: "{{ wait.trigger.event.event_type == 'ekey_access_granted' }}"
             sequence:
               - service: lock.unlock
                 target:
@@ -398,7 +454,7 @@ automation:
                   entity_id: light.entrance
               - service: notify.mobile_app_phone
                 data:
-                  message: "Door unlocked by {{ wait.trigger.event.data.apid }}"
+                  message: "Door unlocked by {{ wait.trigger.event.data.person_name }}"
 
         # Match failed - deny access
         default:
@@ -541,7 +597,19 @@ automation:
       - platform: event
         event_type: ekey_fingerprint_not_matched
       - platform: event
+        event_type: ekey_access_granted
+      - platform: event
+        event_type: ekey_access_denied
+      - platform: event
         event_type: ekey_enrollment_state
+      - platform: event
+        event_type: ekey_enrollment_started
+      - platform: event
+        event_type: ekey_enrollment_complete
+      - platform: event
+        event_type: ekey_fingerprint_deleted
+      - platform: event
+        event_type: ekey_users_changed
       - platform: event
         event_type: ekey_connection_lost
     action:
@@ -550,3 +618,8 @@ automation:
           title: "ekey Event: {{ trigger.event.event_type }}"
           message: "{{ trigger.event.data | tojson }}"
 ```
+
+A single touch produces several of these in order: `ekey_finger_touch`, then
+`ekey_fingerprint_matched` or `_not_matched`, then the resolved
+`ekey_access_granted` / `ekey_access_denied`. Triggering on more than one of them for
+the same reaction runs it twice.

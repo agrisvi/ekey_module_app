@@ -823,12 +823,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "**Optional blueprints** (Home Assistant side, for things the "
                 "backend cannot do):\n"
                 "- *Relay Pulse on Access Granted* — pulse an HA switch\n"
-                "- *Welcome Home Notification* — notify a phone\n\n"
-                "Install them with `./install_blueprints.sh` "
-                "(`.\\install_blueprints.ps1` on Windows), or import the YAML "
-                "from `custom_components/ekey_ha_app/blueprints/` under "
-                "**Settings** → **Automations & scenes** → **Blueprints**.\n\n"
-                "📖 See **QUICKSTART.md** for the step-by-step setup guide."
+                "- *Welcome Home Notification* — notify a phone\n"
+                "- *Access Notification List* — add to HA's own notification "
+                "list\n\n"
+                "Home Assistant does not load blueprints from "
+                "`custom_components/`, so copy each one in: open the YAML in "
+                "`custom_components/ekey_ha_app/blueprints/` and paste it under "
+                "**Settings** → **Automations & scenes** → **Blueprints** → "
+                "**Import Blueprint**.\n\n"
+                "📖 See **docs/QUICKSTART.md** inside the integration folder for "
+                "the step-by-step setup guide."
             )
 
             await hass.services.async_call(

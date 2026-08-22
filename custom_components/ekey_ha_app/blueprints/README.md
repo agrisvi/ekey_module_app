@@ -51,11 +51,14 @@ Configurable:
 > To fix it:
 >
 > 1. Note which relay and duration the old automation used, then delete it.
-> 2. Re-run `install_blueprints.sh` / `.ps1`. It overwrites
->    `config/blueprints/automation/ekey/` **and now lists any other ekey blueprint it
->    finds elsewhere** — an automation created from one of those is still using that
->    file, not the one just installed, which is the case that makes this confusing.
-> 3. Delete the stale files it named.
+> 2. Re-import the current blueprint over the old one (paste the YAML, or re-run
+>    `scripts/install_blueprints.sh` / `.ps1` from a repository clone — those overwrite
+>    `config/blueprints/automation/ekey/` **and list any other ekey blueprint they find
+>    elsewhere**, which is the case that makes this confusing: an automation created
+>    from one of those is still using that file, not the one just installed).
+> 3. Delete any stale copies — anything matching
+>    `config/blueprints/automation/**/*.yaml` that mentions ekey but is not in the
+>    `ekey/` folder.
 > 4. **Developer Tools → YAML → Reload Automations**, then create the automation again
 >    from the ekey blueprint and pick your relay.
 
@@ -98,9 +101,10 @@ Configurable:
 > **The notification list is cleared when Home Assistant restarts.** It is held in
 > memory with no storage behind it, so it is a good inbox and a poor record. Two places
 > keep a durable one: Home Assistant's **logbook** — these events carry the scanner's
-> entity, so they appear in the device's activity view — and the **Event log** in the
-> ekey panel, which lives on the backend and therefore survives Home Assistant being
-> down entirely.
+> entity, so they appear in the device's activity view — and the **access log on the
+> backend's own Admin page**, which is written by the daemon or the ESP32 and therefore
+> survives Home Assistant being down entirely. The ekey panel in the sidebar does not
+> show that log; it manages users and fingerprints only.
 
 `notify.persistent_notification` in the *welcome* blueprint above also reaches the same
 list, and is fine if that is all you want. Use this blueprint instead when you want one
@@ -110,36 +114,44 @@ row that updates, or refusals recorded, or both.
 
 ## How to install
 
-### Method 1: the installer script (recommended)
+Home Assistant does not load a blueprint from `custom_components/`. It only reads
+`config/blueprints/automation/`, so these three files have to be *copied* there once,
+whichever method you use below.
 
-From `custom_components/ekey_ha_app/`:
+### Method 1: copy and paste the YAML (works on every install)
 
-```bash
-./install_blueprints.sh          # Linux, Home Assistant OS
-.\install_blueprints.ps1         # Windows
-```
-
-It copies all three files into `config/blueprints/automation/ekey/`, stops with an
-error if any is missing — no silent half-installs — and lists any other ekey
-blueprint it finds elsewhere, because an automation created from one of those still
-uses that copy rather than the one just installed.
-
-Then: **Developer Tools** → **YAML** → **Reload Automations**.
-
-### Method 2: copy and paste the YAML
-
-1. Open the blueprint file and copy all of it
+1. Open the blueprint file — on your HA machine it is at
+   `config/custom_components/ekey_ha_app/blueprints/<name>.yaml` — and copy all of it
 2. **Settings** → **Automations & scenes** → **Blueprints**
 3. **Import Blueprint** → paste → **Preview** → **Import**
 
-### Method 3: manual file copy
+The GitHub-URL field in that dialog cannot reach a blueprint stored under
+`custom_components/`, so paste the contents rather than a link.
 
-Copy the `.yaml` files into `config/blueprints/automation/ekey/`, creating the
-folder if needed, then reload automations. There is no
-`config/blueprints/script/ekey/` any more — nothing goes there.
+### Method 2: manual file copy
 
-Blueprints stored under `custom_components/` cannot be imported by URL, so the
-UI's GitHub-URL field will not work for these.
+Copy the three `.yaml` files into `config/blueprints/automation/ekey/`, creating the
+folder if needed, then **Developer Tools** → **YAML** → **Reload Automations**. There
+is no `config/blueprints/script/ekey/` any more — nothing goes there.
+
+### Method 3: the installer script (repository clone only)
+
+```bash
+./scripts/install_blueprints.sh          # Linux, Home Assistant OS
+.\scripts\install_blueprints.ps1         # Windows
+```
+
+The scripts live in `scripts/` at the root of the repository, **not inside the
+integration** — HACS installs `custom_components/ekey_ha_app/` and nothing else, so a
+HACS user does not have them and should use Method 1 or 2.
+
+Where they are available they copy all three files into
+`config/blueprints/automation/ekey/`, stop with an error if any is missing — no silent
+half-installs — and list any other ekey blueprint they find elsewhere, because an
+automation created from one of those still uses that copy rather than the one just
+installed.
+
+Then: **Developer Tools** → **YAML** → **Reload Automations**.
 
 ---
 
@@ -171,5 +183,6 @@ depends on Home Assistant — that is a wiring decision, not a configuration one
 
 ## Support
 
-For issues or questions, see the main `README.md` or open an issue on GitHub:
+For issues or questions, see [the integration README](../README.md) or open an issue
+on GitHub:
 <https://github.com/agrisvi/ekey_module_app/issues>
