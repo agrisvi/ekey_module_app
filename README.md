@@ -44,20 +44,51 @@ still fires its actions while Home Assistant is restarting, updating or down.
 
 ## Installation
 
-### Option 1: HACS (recommended)
+**Install the backend first.** This repository is the Home Assistant half, and the
+config flow validates the connection before it will save an entry — so with no
+backend running you get as far as the last screen and are turned away. See
+[Requirements](#requirements) above; on Home Assistant OS the easiest route is the
+[ekey module Daemon add-on](https://github.com/agrisvi/ekey_module_addon).
 
-1. Open HACS → ⋮ → **Custom repositories**
-2. Add `https://github.com/agrisvi/ekey_module_app` with category
-   **Integration**
-3. Find **ekey module App** in the list and **Download**
-4. **Restart** Home Assistant
+### Option 1: HACS — one click
 
-### Option 2: Manual
+[![Open your Home Assistant instance and open a repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agrisvi&repository=ekey_module_app&category=integration)
 
-1. Copy the `custom_components/ekey_ha_app/` folder into your Home Assistant
-   `config/custom_components/` directory
-2. **Restart** Home Assistant — a custom integration is only discovered at
-   startup, so a reload will not find it
+That opens HACS on **your own** Home Assistant with this repository already filled in.
+Press **Download**, then restart Home Assistant.
+
+The same thing by hand, if the link cannot reach your instance:
+
+1. **HACS** → **⋮** (top right) → **Custom repositories**
+2. Repository `https://github.com/agrisvi/ekey_module_app`, type **Integration**
+3. **Add**, then find **ekey module App** in the list and **Download**
+4. Restart Home Assistant
+
+HACS is not part of Home Assistant and has to be installed once first. If there is no
+**HACS** entry in your sidebar you do not have it — see
+[hacs.xyz](https://hacs.xyz/docs/use/download/download/), or skip it and use Option 2,
+which installs exactly the same files.
+
+### Option 2: Manual — no HACS
+
+Copy `custom_components/ekey_ha_app/` from this repository into your Home Assistant
+configuration directory, so that `config/custom_components/ekey_ha_app/manifest.json`
+exists. From a shell on the Home Assistant host:
+
+```bash
+cd /tmp
+wget -O app.tar.gz https://github.com/agrisvi/ekey_module_app/archive/refs/heads/main.tar.gz
+tar xzf app.tar.gz
+mkdir -p /config/custom_components
+cp -r ekey_module_app-main/custom_components/ekey_ha_app /config/custom_components/
+```
+
+### Either way: restart, do not reload
+
+A custom integration is discovered only at Home Assistant **startup**. Reloading YAML
+or refreshing the page will not find it — and the symptom is that **ekey module App**
+simply does not appear under **Add Integration**, which looks exactly like a failed
+download. Restart first, then go looking.
 
 ---
 
