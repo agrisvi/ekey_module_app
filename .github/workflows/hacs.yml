@@ -28,7 +28,7 @@ jobs:
     name: HACS validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # HACS runs eight checks, each of which can be waived through `ignore`:
       #   archived  description  hacsjson  images  information  issues  topics  brands
