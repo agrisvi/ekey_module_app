@@ -290,8 +290,12 @@ class EkeyAppClient:
         :class:`EkeyNotFoundError` and means "do not offer this". The reply carries
         ``editable`` and ``applies``, both of which depend on how *this* backend was
         started, so neither may be assumed by the caller.
+
+        The probe timeout, not the document one: the options flow calls this before it
+        can draw its menu, so an unreachable backend must cost the operator a few
+        seconds of a dialog opening, not fifteen.
         """
-        payload = await self._request("GET", API_APP_SERIAL)
+        payload = await self._request("GET", API_APP_SERIAL, timeout=TIMEOUT_PROBE)
         return payload if isinstance(payload, dict) else {}
 
     async def async_set_serial(

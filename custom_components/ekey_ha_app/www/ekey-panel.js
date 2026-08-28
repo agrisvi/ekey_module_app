@@ -123,10 +123,6 @@ class EkeyPanel extends HTMLElement {
     this._loading = false;
     this._unsub = null;
     this._booted = false;
-    /* The serial-port reply, or null when this backend has no such setting (a device
-       with the sensor on fixed pins) or is too old to answer. null means "render
-       nothing", which is why the section never has to ask a capability flag. */
-    this._serial = null;
   }
 
   /* HA assigns this on every render of the panel, so it must stay cheap: only
@@ -271,27 +267,8 @@ class EkeyPanel extends HTMLElement {
       this._data = null;
       this._say(`Could not read users: ${err.message || err}`, "err");
     }
-    /* Separate from the users read, and separately tolerant: a backend without this
-       endpoint must not blank out the user list, and a failure here is not worth a
-       message — the section simply is not offered. */
-    await this._loadSerial();
     this._loading = false;
     this._render();
-  }
-
-  async _loadSerial() {
-    if (!this._entryId) {
-      this._serial = null;
-      return;
-    }
-    try {
-      this._serial = await this._ws({
-        type: "ekey_ha_app/serial/get",
-        entry_id: this._entryId,
-      });
-    } catch (err) {
-      this._serial = null;
-    }
   }
 
   // -------------------------------------------------------------------- render
@@ -317,15 +294,19 @@ class EkeyPanel extends HTMLElement {
       parts.push(`<div class="card"><p class="empty">No ekey scanner is configured yet.
         Add one under Settings → Devices &amp; services.</p></div>`);
     } else if (scanner && !scanner.loaded) {
+      /* The serial port is named here on purpose: a wrong port is one of the two reasons
+         a backend is unreachable (the other is the host/token), and this card is where
+         someone lands when it is. It says where the setting lives, since it is no longer
+         on this page. */
       parts.push(`<div class="card"><p class="empty">This scanner is not loaded — it may be
-        starting up or unreachable.</p></div>`);
+        starting up or unreachable. Check its address, token and serial port under
+        Settings → Devices &amp; services → ekey module App → <b>Configure</b>.</p></div>`);
     } else if (this._data && this._data.app_api === false) {
       parts.push(this._renderNoAppApi(scanner));
     } else if (this._data) {
       parts.push(this._renderAddUser());
       parts.push(this._renderUsers());
       parts.push(this._renderUnassigned());
-      parts.push(this._renderSerial());
       modal = this._renderEnroll();
     } else if (this._loading) {
       parts.push('<div class="card"><p class="empty">Loading…</p></div>');
@@ -519,58 +500,10 @@ class EkeyPanel extends HTMLElement {
       </div>`;
   }
 
-  /* Which port the scanner is wired to.
-     Rendered only when the backend answered — a device with the sensor on fixed pins, or
-     an installation where the port comes from the add-on configuration, simply has no
-     section here rather than a control that cannot work. Whether the control appears at
-     all, and whether a change needs a restart, are read from the reply: both depend on how
-     that particular backend was started, so neither can be assumed here. */
-  _renderSerial() {
-    const s = this._serial;
-    if (!s || !Array.isArray(s.ports) || !s.ports.length) return "";
-
-    const active = s.active || s.selected || "";
-    const options = s.ports.map((p) => {
-      const marks = [];
-      if (p.console) marks.push("system console");
-      if (p.busy) marks.push("in use");
-      const text = `${p.label || p.path} — ${p.path}` +
-        (marks.length ? `  [${marks.join(", ")}]` : "");
-      const chosen = s.selected && p.path === s.selected ? " selected" : "";
-      return `<option value="${esc(p.path)}"${chosen}>${esc(text)}</option>`;
-    }).join("");
-
-    let hint;
-    if (!s.editable) {
-      hint = s.source === "cli"
-        ? `The port is set outside Home Assistant — with the daemon's <code>-d</code>
-           option, or in the add-on configuration. Change it there.`
-        : "The port cannot be changed from here on this installation.";
-    } else if (s.applies === "restart") {
-      hint = `A different port takes effect when the daemon restarts: it is already
-              connected to the current one.`;
-    } else {
-      hint = `No scanner is connected yet, so a port chosen here is tried within 30
-              seconds — no restart needed.`;
-    }
-
-    const control = s.editable ? `
-        <div class="bar">
-          <select id="serial-pick">${options}</select>
-          <button class="sm" id="serial-save">Use this port</button>
-        </div>` : "";
-
-    return `<div class="card">
-        <h2>Scanner connection</h2>
-        <div class="finger">
-          <div>Serial port</div>
-          <div class="apid">${esc(active || "none chosen yet")}</div>
-        </div>
-        ${control}
-        <p class="hint">${hint} Ports marked <b>system console</b> are the machine's own
-          terminal; choosing one can switch it into RS485 mode, so it asks first.</p>
-      </div>`;
-  }
+  /* No "Scanner connection" card here any more: which serial port the scanner is wired
+     to is a connection setting and lives in the config entry's Configure dialog, beside
+     the host and token that reach the same backend — Settings → Devices & services →
+     ekey module App → Configure. This page is about users and their fingers. */
 
   /* The picker and the live progress are ONE dialog, in that order, exactly as on the
      device's page. Keeping progress in the modal matters: the person is looking at this
@@ -671,7 +604,6 @@ class EkeyPanel extends HTMLElement {
       if (ev.target === ev.currentTarget) this._closeEnroll();
     });
     on("cancel-edit", "click", () => { this._editing = null; this._render(); });
-    on("serial-save", "click", () => this._saveSerial());
 
     root.querySelectorAll("[data-edit]").forEach((el) =>
       el.addEventListener("click", () => {
@@ -702,37 +634,6 @@ class EkeyPanel extends HTMLElement {
       this._say(err.message || String(err), "err");
       return null;
     }
-  }
-
-  async _saveSerial() {
-    const sel = this.shadowRoot.getElementById("serial-pick");
-    if (!sel || !sel.value) return;
-
-    /* The console flag comes from the option text the backend built, so the confirmation
-       and the confirm_console the backend checks are about the same port. */
-    const opt = sel.options[sel.selectedIndex];
-    const isConsole = !!(opt && opt.textContent.indexOf("system console") >= 0);
-    if (isConsole && !confirm(
-      "That port is the machine's own system console. Using it can switch it into RS485 " +
-      "mode and disturb whatever else is on it. Continue?")) {
-      return;
-    }
-
-    const result = await this._call({
-      type: "ekey_ha_app/serial/set",
-      entry_id: this._entryId,
-      path: sel.value,
-      confirm_console: isConsole,
-    });
-    if (result) {
-      /* The reply IS the new state, so there is nothing to re-fetch and no window in
-         which the section could disagree with the backend. */
-      this._serial = result;
-      this._say(result.applies === "restart"
-        ? "Saved. Restart the daemon to move to this port."
-        : "Saved. Connecting on this port within 30 seconds.", "ok");
-    }
-    this._render();
   }
 
   async _addUser() {

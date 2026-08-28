@@ -108,8 +108,6 @@ def async_register(hass: HomeAssistant) -> None:
         ws_fingerprint_delete,
         ws_enroll_start,
         ws_enroll_cancel,
-        ws_serial_get,
-        ws_serial_set,
         ws_subscribe,
     ):
         websocket_api.async_register_command(hass, command)
@@ -538,54 +536,11 @@ async def ws_enroll_cancel(hass: HomeAssistant, connection, msg) -> None:
 
 # --------------------------------------------------------------- subscription
 
-
-# ---------------------------------------------------------------- serial port
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "ekey_ha_app/serial/get",
-        vol.Required("entry_id"): str,
-    }
-)
-@websocket_api.require_admin
-@websocket_api.async_response
-@_handle_errors
-async def ws_serial_get(hass: HomeAssistant, connection, msg) -> None:
-    """Which serial port the scanner is on, and what else this backend offers.
-
-    A backend where the port is not a setting — a device with the sensor on fixed UART
-    pins — answers 501, which arrives here as EkeyNotFoundError and is reported as such
-    so the panel omits the section instead of showing a control it cannot honour.
-    """
-    rt = _runtime(hass, msg["entry_id"])
-    connection.send_result(msg["id"], await rt.client.async_get_serial())
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "ekey_ha_app/serial/set",
-        vol.Required("entry_id"): str,
-        vol.Required("path"): vol.All(str, vol.Length(min=1, max=255)),
-        vol.Optional("confirm_console", default=False): bool,
-    }
-)
-@websocket_api.require_admin
-@websocket_api.async_response
-@_handle_errors
-async def ws_serial_set(hass: HomeAssistant, connection, msg) -> None:
-    """Choose the port. The reply is the new state, straight from the backend.
-
-    No validation of the path here on purpose: whether a given node is a serial device,
-    a system console, or the one the daemon was started with is something only the
-    backend can answer, and duplicating a guess at it in Python would be a second
-    opinion that can disagree with the one that matters.
-    """
-    rt = _runtime(hass, msg["entry_id"])
-    result = await rt.client.async_set_serial(
-        msg["path"], confirm_console=msg.get("confirm_console", False)
-    )
-    connection.send_result(msg["id"], result)
+# The serial-port pair that used to live here is gone: the port is a connection
+# setting and now belongs to the config entry's Configure dialog (see
+# ``EkeyOptionsFlow`` in config_flow.py), which reaches the same client directly.
+# Keeping the commands as well would leave a second, unused path into the same
+# write — the kind that stops being tested and then stops working.
 
 
 @websocket_api.websocket_command(

@@ -226,71 +226,27 @@ console.log("message placement:");
   check("the message is inside the dialog", p._renderEnroll().includes("Something failed"));
 }
 
-/* The serial-port section. Its whole contract is that it renders NOTHING unless the
- * backend answered, and that the control and the wording come from the reply rather than
- * from an assumption — a panel that offers to change a port it cannot change, or promises
- * "no restart needed" to a daemon that is already bound, is worse than one that stays
- * quiet. Each of the four states below is one deployment we actually ship. */
-console.log("serial port section:");
+/* The serial port is no longer on this page — it is a connection setting and lives in
+ * the config entry's Configure dialog (EkeyOptionsFlow; tests/ha_component/test_serial.py
+ * covers it). Two things are worth pinning down about the move rather than deleting the
+ * section's tests outright: that no port control came back here by accident, and that the
+ * one screen where a wrong port is the likely cause says where the setting now is. A
+ * panel that quietly drops the pointer leaves the operator with an unreachable backend
+ * and nowhere obvious to look. */
+console.log("serial port has moved to the options flow:");
 {
-  const ports = [
-    { path: "/dev/ttyUSB0", label: "ekey FSX CONVERTER 23180001 (ftdi_sio)", kind: "usb" },
-    { path: "/dev/ttyS0", label: "ttyS0 (serial8250)", kind: "internal", console: true },
-    { path: "/dev/ttyUSB1", label: "other (cp210x)", kind: "usb", busy: true },
-  ];
-
-  check("no reply at all renders nothing", panel({ _serial: null })._renderSerial() === "");
-  check("a reply with no ports renders nothing",
-    panel({ _serial: { ports: [] } })._renderSerial() === "");
-
-  // A standalone daemon that has not bound yet: editable, applies immediately.
-  const unbound = panel({ _serial: {
-    ports, selected: "/dev/ttyUSB0", active: "", source: "file",
-    editable: true, bound: false, applies: "immediately" } })._renderSerial();
-  check("offers the picker when editable", unbound.includes('id="serial-pick"'));
-  check("offers Save when editable", unbound.includes('id="serial-save"'));
-  check("lists internal ports too, not just USB", unbound.includes("/dev/ttyS0"));
-  check("flags the system console", unbound.includes("system console"));
-  check("flags a port in use", unbound.includes("in use"));
-  check("preselects the saved port",
-    /value="\/dev\/ttyUSB0" selected/.test(unbound));
-  check("says no restart is needed while unbound", unbound.includes("no restart needed"));
-  /* Unbound but already chosen must show the CHOICE, not "nothing" — that is the state
-     between saving a port and the retry thread reaching it. */
-  check("shows the saved port even before it is bound", unbound.includes("/dev/ttyUSB0"));
-
-  const nothing = panel({ _serial: {
-    ports, selected: "", active: "", source: "none",
-    editable: true, bound: false, applies: "immediately" } })._renderSerial();
-  check("says 'none chosen yet' only when nothing is chosen at all",
-    nothing.includes("none chosen yet"));
-
-  // The same daemon once it is bound: a change now needs a restart.
-  const bound = panel({ _serial: {
-    ports, selected: "/dev/ttyUSB0", active: "/dev/ttyUSB0", source: "file",
-    editable: true, bound: true, applies: "restart" } })._renderSerial();
-  check("says a restart is needed once bound", bound.includes("restarts"));
-  check("shows the active port", bound.includes("/dev/ttyUSB0"));
-
-  // The add-on: the port comes from its configuration, so no control at all.
-  const pinned = panel({ _serial: {
-    ports, selected: "/dev/ttyUSB0", active: "/dev/ttyUSB0", source: "cli",
-    editable: false, bound: true, applies: "restart" } })._renderSerial();
-  check("no picker when not editable", !pinned.includes('id="serial-pick"'));
-  check("no Save when not editable", !pinned.includes('id="serial-save"'));
-  check("still shows which port is in use", pinned.includes("/dev/ttyUSB0"));
-  check("explains where the port is set instead", pinned.includes("add-on configuration"));
-
-  // A hostile label must not be able to close the option tag.
-  const nasty = panel({ _serial: {
-    ports: [{ path: '/dev/tty"><script>x</script>', label: "<b>x</b>", kind: "usb" }],
-    selected: "", active: "", source: "none", editable: true, bound: false,
-    applies: "immediately" } })._renderSerial();
-  /* The static hint legitimately contains <b>, so the assertion is about the DATA:
-     the injected markup must arrive escaped and no script tag may survive anywhere. */
-  check("escapes a hostile label", nasty.includes("&lt;b&gt;"));
-  check("escapes a hostile path", nasty.includes("&quot;&gt;"));
-  check("no script tag survives", !nasty.includes("<script>"));
+  const p = panel({
+    _scanners: [{ entry_id: "e1", title: "ekey Scanner", loaded: false }],
+    _entryId: "e1",
+  });
+  p._renderShell();
+  const html = p._body.innerHTML;
+  check("no port picker is rendered anywhere", !html.includes("serial-pick"));
+  check("no Use-this-port button is rendered", !html.includes("serial-save"));
+  check("the panel no longer has a serial renderer",
+    typeof p._renderSerial === "undefined");
+  check("an unloaded scanner points at the Configure dialog",
+    html.includes("Configure") && html.includes("serial port"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

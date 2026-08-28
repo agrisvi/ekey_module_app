@@ -51,8 +51,23 @@
       "init": {
         "title": "ekey device options",
         "menu_options": {
+          "serial": "Scanner connection (serial port)",
           "wifi_push": "Push Wi-Fi credentials to the device",
           "wifi_reset": "Reset the device's Wi-Fi (return to setup mode)"
+        }
+      },
+      "serial": {
+        "title": "Scanner connection",
+        "description": "Which serial port the ekey scanner is wired to.\n\nCurrently: {current}\n\n{applies}\n\nPorts marked [system console] are the machine's own terminal — choosing one can switch it into RS485 mode, so it asks for confirmation first. A port marked [in use] is held by another process, which may be a previous run of this same backend.",
+        "data": {
+          "path": "Serial port"
+        }
+      },
+      "serial_console": {
+        "title": "That port is the system console",
+        "description": "{port} is this machine's own terminal. Using it for the scanner can switch that UART into RS485 mode and disturb whatever else is on it.",
+        "data": {
+          "confirm": "Yes, use this port anyway"
         }
       },
       "wifi_push": {
@@ -77,10 +92,16 @@
     "error": {
       "cannot_connect": "Could not reach the device.",
       "invalid_auth": "Authentication failed — check the API token.",
-      "config_failed": "The device rejected the request."
+      "config_failed": "The device rejected the request.",
+      "serial_failed": "The backend rejected that port. Check the log for the reason it gave.",
+      "serial_elsewhere": "This installation keeps the serial port outside Home Assistant — in the add-on configuration, or the daemon's -d option. Change it there."
     },
     "abort": {
-      "local_no_options": "Wi-Fi configuration is only available for remote ekey devices, not the local daemon."
+      "no_options": "There is nothing to configure for this entry: this backend does not choose its own serial port, and Wi-Fi settings only exist on an ekey device.",
+      "serial_unavailable": "The backend did not answer with its serial-port settings. It may be unreachable, or it may not choose its own port.",
+      "serial_read_only": "The scanner is on {port}, and that is set {where}, not in Home Assistant. Change it there.",
+      "serial_saved": "Saved. The scanner will be connected on {port} within 30 seconds — no restart needed.",
+      "serial_saved_restart": "Saved: {port}. The backend is still connected on the previous port and moves to this one when it restarts."
     }
   },
   "services": {

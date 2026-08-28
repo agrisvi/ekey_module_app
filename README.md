@@ -113,9 +113,30 @@ the panel below.
 If the backend later rejects the stored token, the integration asks for a new one
 through a reauth notice rather than failing silently.
 
-An ESP32 entry also gets a **Configure** button, which can push new Wi-Fi credentials
-to the device or reset it back into its setup portal. A local daemon entry has nothing
-to configure there and says so.
+### Configure — the connection settings
+
+Every entry gets a **Configure** button, and what it offers is decided by the backend
+rather than by the connection mode:
+
+| Entry | What it offers |
+|---|---|
+| **Scanner connection (serial port)** | which serial port the scanner is wired to, on any backend where that is a setting — a daemon or add-on on a Linux host. A device with the sensor on fixed UART pins does not have it |
+| **Push Wi-Fi credentials** / **Reset the device's Wi-Fi** | ESP32 entries only — only a device owns its own network settings |
+
+The port picker lists every port the backend enumerated, flagging the machine's own
+`[system console]` (choosing one asks for confirmation, because it can switch that UART
+into RS485 mode) and any port `[in use]` by another process. After saving, the dialog
+says whether the scanner is connected on the new port within 30 seconds or whether the
+backend has to restart first — read from the reply, because a backend already bound to
+a port cannot be re-pointed while it runs.
+
+Where the port is set outside Home Assistant — the add-on's own configuration, or the
+daemon's `-d` option — the dialog reports which port is in use and where to change it,
+rather than offering a control that would be refused. An entry with nothing to
+configure at all says so.
+
+> The port used to be a card on the sidebar panel. It moved here because it is a
+> connection setting, next to the host and token that reach the same backend.
 
 ---
 
