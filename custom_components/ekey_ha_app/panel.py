@@ -40,6 +40,11 @@ _LOGGER = logging.getLogger(__name__)
 # that counts loaded entries filters these bookkeeping keys out.
 _REGISTERED = "_panel_registered"
 
+# The resolved integration version, published on hass.data so code that is not the
+# panel can stamp it onto things — a backup file records which build wrote it, and
+# "which version made this" is the first question about a file that will not load.
+PANEL_VERSION_KEY = "_panel_version"
+
 
 async def async_register_panel(hass: HomeAssistant) -> None:
     """Serve the panel's JS and add the sidebar entry. Idempotent."""
@@ -64,6 +69,8 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         version = str(integration.version or "dev")
     except Exception:  # noqa: BLE001 — a missing version must not cost us the panel
         version = "dev"
+
+    domain_data[PANEL_VERSION_KEY] = version
 
     await panel_custom.async_register_panel(
         hass,

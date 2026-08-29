@@ -44,4 +44,6 @@ desktop.ini
 # ---- Runtime / log files ----
 *.log
 
+# ---- Working design / plan documents (kept local, not shipped) ----
 HOME_ASSISTANT_APP_DESIGN.md
+custom_components/ekey_ha_app/docs/FINGERPRINT_STORAGE_PLAN.md

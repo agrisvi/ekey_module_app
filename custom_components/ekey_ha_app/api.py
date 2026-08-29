@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 import aiohttp
@@ -40,12 +41,16 @@ from .const import (
     API_APP_MQTT,
     API_APP_SERIAL,
     API_APP_USERS,
+    API_DEVICE,
+    API_FINGERPRINT_TEMPLATE,
     API_FINGERPRINTS,
     API_FINGERPRINTS_ENROLL,
     API_FINGERPRINTS_ENROLL_CONFIRM,
     API_FINGERPRINTS_ENROLL_QUIT,
     API_FINGERPRINTS_ENROLL_STATE,
+    API_FINGERPRINTS_TEMPLATE,
 )
+from .templates import DEFAULT_DOMAIN_ID, TemplateInfo, parse_template_hex
 from .util import clean_json_string, pick_rpc_reply, split_json_documents
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +91,35 @@ class EkeyBusyError(EkeyApiError):
 
 class EkeyScannerRefused(EkeyApiError):
     """HTTP 200 with ``rpc_error_code: "Error"`` — the sensor itself said no."""
+
+
+class EkeyTemplateRejected(EkeyApiError):
+    """A template was sent and the scanner did not keep it.
+
+    Its own class because this is *not* a transport failure and reads like a
+    success everywhere except in one field: HTTP 200, ``rpc_error_code: "OK"``,
+    and ``verified: false``. The usual cause is a device-variant or ``domainID``
+    mismatch, i.e. a fingerprint that can never be copied to that scanner — so the
+    caller wants to report it as a permanent skip rather than retry it forever.
+
+    ``verdict`` distinguishes "the device answered and refused"
+    (``device_response``) from "only the transport ever acknowledged it"
+    (``transport_ack_only``), which is the difference between a definite no and an
+    unconfirmed write worth verifying against the saved-AP list.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        apid: str | None = None,
+        verdict: str | None = None,
+        verified: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.apid = apid
+        self.verdict = verdict
+        self.verified = verified
 
 
 class EkeyAppClient:
@@ -442,4 +476,107 @@ class EkeyAppClient:
             f"{API_FINGERPRINTS}/{quote(apid, safe='')}",
             timeout=TIMEOUT_SCANNER,
         )
+        return payload if isinstance(payload, dict) else {}
+
+    # ------------------------------------------------------- templates
+
+    async def async_get_template(
+        self, apid: str, *, domain_id: str | None = None
+    ) -> TemplateInfo:
+        """``GET /api/v1/fingerprints/<apid>/template`` — read a finger's template.
+
+        Returns a *validated* :class:`~.templates.TemplateInfo` rather than the raw
+        body, because a template that has not been checked has no business being
+        stored: the blob carries its own length and its own AP-ID, and both are
+        compared here (see :mod:`.templates` for the failure this prevents).
+
+        ``domain_id`` is sent only when it differs from the backend's own default.
+        It is the salt in the device's transport-key derivation, so the value used
+        on the read must be the value used on the eventual write — which is why the
+        caller is handed :attr:`~.templates.TemplateInfo` plus the ``domainID`` the
+        backend echoes, and is expected to store both. There is no query-parameter
+        form for it, so a non-default value travels as a GET body.
+
+        A backend too old for this route answers 404/501 and therefore raises
+        :class:`EkeyNotFoundError` — "this scanner cannot take part", not an error.
+        """
+        from urllib.parse import quote
+
+        body: dict[str, Any] | None = None
+        if domain_id and domain_id != DEFAULT_DOMAIN_ID:
+            body = {"domainID": domain_id}
+
+        payload = await self._request(
+            "GET",
+            API_FINGERPRINT_TEMPLATE.format(apid=quote(apid, safe="")),
+            body=body,
+            timeout=TIMEOUT_SCANNER,
+        )
+        self._check_rpc(payload, f"read the template for {apid}")
+        if not isinstance(payload, dict):
+            raise EkeyApiError(f"read the template for {apid}: unexpected reply")
+
+        # Absent means the backend used its default — the field is only emitted
+        # when non-empty, and treating absent as "unknown" would store a record
+        # that can never be written back.
+        echoed = payload.get("domainID")
+        info = parse_template_hex(payload.get("apFingerTemplate"), expect_apid=apid)
+        return replace(
+            info,
+            domain_id=echoed if isinstance(echoed, str) and echoed else DEFAULT_DOMAIN_ID,
+        )
+
+    async def async_put_template(
+        self, template_hex: str, *, domain_id: str | None = None
+    ) -> dict[str, Any]:
+        """``PUT /api/v1/fingerprints/template`` — write a template to the sensor.
+
+        No APID anywhere in the request: it travels inside the blob, and the
+        backend reads it out of the plaintext header to tell us which finger it
+        just wrote.
+
+        **The status code proves nothing here.** The scanner acknowledges the
+        transport frames before it has decrypted anything, so a 200 with
+        ``rpc_error_code: "OK"`` and ``verified: false`` means the transfer was
+        accepted and the template was *not kept* — almost always a device-variant
+        or ``domainID`` mismatch. This method therefore raises
+        :class:`EkeyTemplateRejected` on anything but ``verified: true``, and the
+        exception carries ``verdict`` so the caller can tell "the device said no"
+        (``device_response``) from "nobody ever confirmed" (``transport_ack_only``).
+
+        Returns the reply on success, whose ``apid`` is the finger the sensor
+        reports having stored — worth comparing against the one intended.
+        """
+        info = parse_template_hex(template_hex)
+        body: dict[str, Any] = {"apFingerTemplate": info.hex}
+        if domain_id and domain_id != DEFAULT_DOMAIN_ID:
+            body["domainID"] = domain_id
+
+        payload = await self._request(
+            "PUT", API_FINGERPRINTS_TEMPLATE, body=body, timeout=TIMEOUT_SCANNER
+        )
+        self._check_rpc(payload, f"write the template for {info.apid}")
+        if not isinstance(payload, dict):
+            raise EkeyApiError(f"write the template for {info.apid}: unexpected reply")
+
+        if payload.get("verified") is not True:
+            raise EkeyTemplateRejected(
+                f"the scanner did not keep the template for {info.apid}",
+                apid=payload.get("apid") or info.apid,
+                verdict=payload.get("verdict"),
+                verified=payload.get("verified"),
+            )
+        return payload
+
+    async def async_get_device(self) -> dict[str, Any]:
+        """``GET /api/v1/device`` — identity, firmware, and the device variant.
+
+        ``dev_variant`` is the one field that decides whether a template can move
+        between two scanners at all: the transport key is derived from it together
+        with the ``domainID``, so a copy across variants can never be decrypted and
+        only ekey can change a device's variant. Read it before offering a push,
+        not after failing one.
+        """
+        payload = await self._request("GET", API_DEVICE, timeout=TIMEOUT_SCANNER)
+        self._check_rpc(payload, "read device information")
         return payload if isinstance(payload, dict) else {}

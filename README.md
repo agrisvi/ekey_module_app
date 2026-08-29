@@ -26,6 +26,12 @@ not here. This repo is the Home Assistant front end for them, which is why it ha
 few entities and no automation logic of its own — and why a recognised finger
 still fires its actions while Home Assistant is restarting, updating or down.
 
+The one exception is the [fingerprint database](#fingerprint-storage--the-central-database):
+a copy of every fingerprint *template*, held in Home Assistant because a template cannot
+be re-derived and nothing else in the system keeps one. It never takes part in opening a
+door — it exists so a sensor can be repaired, replaced or added without asking everyone
+to enroll again.
+
 ---
 
 ## Requirements
@@ -119,7 +125,7 @@ Every entry gets a **Configure** button, and what it offers is decided by the ba
 rather than by the connection mode:
 
 | Entry | What it offers |
-|---|---|
+| --- | --- |
 | **Scanner connection (serial port)** | which serial port the scanner is wired to, on any backend where that is a setting — a daemon or add-on on a Linux host. A device with the sensor on fixed UART pins does not have it |
 | **Push Wi-Fi credentials** / **Reset the device's Wi-Fi** | ESP32 entries only — only a device owns its own network settings |
 
@@ -174,6 +180,81 @@ The old v1 map is copied verbatim under a `legacy` key in
 always recoverable by hand. Anything ambiguous — two candidates for one person, a
 finger slot already occupied — is never guessed: it is left alone and reported as a
 repair issue.
+
+---
+
+## Fingerprint storage — the central database
+
+The panel's scanner dropdown has one extra entry, **Fingerprint storage**, under a
+*Home Assistant* group. It is not a scanner: it is Home Assistant's own copy of every
+fingerprint *template*, and it exists because a template cannot be re-derived from
+anything. Replace a sensor or factory-reset one, and without a copy every person on it
+has to come back and present a finger again.
+
+What makes a central copy possible is that **the APID lives inside the template blob,
+in plaintext** — so a template written to a second scanner keeps its identity. One
+physical finger has one APID across the whole fleet.
+
+> **The database never opens a door.** A scanner does that. Deleting everything here
+> takes nobody's finger off any sensor; what it costs is the ability to repair a
+> scanner, add one, or recover from a factory reset.
+
+### The presence matrix
+
+Each finger row carries one chip per configured scanner, so the question an
+administrator actually has — *is this finger on all my doors?* — is answered at a
+glance:
+
+| Chip | Meaning |
+| --- | --- |
+| `ok` | that sensor holds it |
+| `missing` | the database has it, that sensor does not — fixable with **Push** |
+| `extra` | that sensor has it, the database does not — fixable with **Adopt** |
+| `?` | that scanner's list could not be read. **Not** the same as missing; nothing is assumed |
+| `n/a` | it can never be copied there — a different device variant, or a backend with no template routes |
+
+Past four scanners the healthy chips collapse into one (`ok on 7`) so that deviations
+stand out; the collapsed names stay in the tooltip.
+
+### What each button does
+
+| Action | Effect |
+| --- | --- |
+| **Sync from a scanner…** | reads that scanner's templates into the database. Writes nothing to it, and nobody presents a finger |
+| **Sync to storage…** (on a scanner's card) | the same thing, previewed first, from the scanner you are looking at |
+| **Adopt into database** | pulls in one fingerprint the database was missing, keeping its APID |
+| **Push…** | writes stored templates to the scanners that lack them, *and* names the owner in each scanner's own user list, so that sensor keeps working — with the right person — when Home Assistant is down |
+| **Create backup…** | an encrypted file, downloaded to your computer |
+| **Restore backup…** | reads a file back. **Writes to no scanner**: afterwards the matrix shows what is missing where, and you choose what to push |
+| **Clean storage…** | deletes every record. Typed confirmation; the scanners are untouched |
+
+**Nothing is ever pushed automatically.** Drift is detected continuously and displayed,
+but a write to a door controller only ever happens when you click. Transfers are slow —
+a few seconds per fingerprint, because the sensor spends ~1.9 s registering each one —
+so bulk actions run as a background job with live per-item progress and a **Stop** that
+takes effect between fingerprints, never inside one.
+
+A write is only reported as successful when the scanner confirms it **kept** the
+template. The endpoint answers HTTP 200 even when it accepted a transfer and discarded
+it, so success is read from the `verified` field and nothing else.
+
+### Backups contain biometric data
+
+A backup file holds working fingerprint templates. Anyone who copies it can write those
+fingerprints into any scanner of the same device variant — which is to say, mint working
+credentials for the building. So:
+
+- backups are **passphrase-encrypted by default** (scrypt + AES-256-GCM, built on Home
+  Assistant's side; the file's own header is authenticated, so an edited header will not
+  open). An unencrypted export exists behind an explicit checkbox and says what it is;
+- a lost passphrase is a lost backup — there is no recovery path;
+- the database itself lives in `.storage/ekey_ha_app.fingerprint_vault` as plain JSON,
+  which means **it is included in Home Assistant's own backups**. Encrypting it with a
+  key stored beside it would be theatre, so it is not done; use HA's encrypted backups
+  and keep the config directory private;
+- if Home Assistant is served over plain HTTP, templates and the backup passphrase
+  cross your network in the clear. That is a reason to put HA behind HTTPS, and it is
+  not something this feature can fix.
 
 ---
 
@@ -333,10 +414,18 @@ pytest tests/ha_component/ --cov=custom_components/ekey_ha_app --cov-report=term
 node tests/panel_render_test.mjs
 ```
 
-The panel is plain ES modules with no build step, so its enrolment dialog can be
-rendered and asserted on in Node with a handful of DOM stubs. That covers the two
-states only reachable mid-request — "starting" and "live" — which are the ones that
-otherwise rot unnoticed.
+The panel is plain ES modules with no build step, so its dialogs can be rendered and
+asserted on in Node with a handful of DOM stubs. That covers the states only reachable
+mid-request — enrolment's "starting" and "live", and every step of the storage view's
+upload and job dialogs — which are the ones that otherwise rot unnoticed.
+
+The fingerprint database has its own suites, and they are written around the failures
+rather than the happy paths: `test_templates.py` (a blob that is really a saved error
+reply, a truncated one, one belonging to another finger), `test_backup.py` (a wrong
+passphrase, an edited header, a foreign file), `test_jobs.py` (`verified: false` never
+counted as stored, a variant mismatch skipped rather than retried, the 24 kB user-document
+cap) and `test_storage_ws.py` (an unreadable scanner list reported as unknown, a restore
+that touches no scanner).
 
 CI runs hassfest validation, pytest on Python 3.13 (Home Assistant 2026.x needs it)
 and the panel render tests — see

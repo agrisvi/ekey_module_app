@@ -66,7 +66,9 @@ used to need a dashboard full of helper entities:
 | Enrol a finger | panel → **Enroll fingerprint** (modal, live progress) |
 | Assign a fingerprint enrolled on the device | panel → **Unassigned fingerprints** |
 | Delete a fingerprint | panel → user list → **Delete** |
-| Change which serial port the scanner is on | panel → **Scanner connection** — *standalone daemon only, see below* |
+| Back up every fingerprint template | panel → **Fingerprint storage** — *see below* |
+| Copy a fingerprint to another scanner | panel → **Fingerprint storage** → **Push** |
+| Change which serial port the scanner is on | Settings → Devices & services → **Configure** — *not the panel, see below* |
 | Actions, automations, access log, MQTT, KNX | the backend's own **Admin** page |
 
 The backend token never reaches the browser: the panel talks to Home Assistant
@@ -76,22 +78,53 @@ Rules that must survive a Home Assistant restart — LED feedback, KNX, MQTT,
 webhooks — belong on the backend, not here. That is why they are configured on the
 Admin page rather than in this integration.
 
-### Scanner connection
+### Fingerprint storage — the central database
 
-The panel shows which serial port the scanner is on, and lets you change it — but only
-where that is genuinely this page's to change. The section appears at all only when the
-backend says the port is a setting, and the control inside it only when the backend says it
-is editable:
+The scanner dropdown carries one extra entry, **Fingerprint storage**, under a *Home
+Assistant* group. It holds a copy of every fingerprint **template**, which exists because
+a template cannot be re-derived: replace a sensor and, without a copy, everyone on it
+re-enrols. The copy is portable because the APID travels inside the template's own
+plaintext header, so a template written to another scanner keeps its identity.
+
+Each finger row shows one chip per scanner — `ok` / `missing` / `extra` / `?` (list
+unreadable, **not** the same as missing) / `n/a` (a different device variant, so it can
+never be copied there). **Sync from a scanner** fills the database, **Push** writes
+missing templates out (and names the owner in that scanner's own user list, so it keeps
+working when Home Assistant is down), **Create backup** / **Restore backup** move the set
+to and from a file, **Clean storage** empties it.
+
+Two properties worth knowing:
+
+- **nothing is written to a scanner unless you click.** Drift is detected and shown; a
+  write to a door controller is never on a timer or triggered by a reconnect. Transfers
+  take seconds each, so they run as a job with per-item progress and a Stop that lands
+  between fingerprints;
+- **success means the sensor confirmed it kept the template.** The write endpoint answers
+  HTTP 200 even when it accepted a transfer and threw it away, so only the `verified`
+  field is believed.
+
+Backups are passphrase-encrypted by default (scrypt + AES-256-GCM, done on the Home
+Assistant side, with the file's header authenticated so an edited one will not open). A
+backup contains working biometric credentials for the building — and the database itself
+sits in `.storage/ekey_ha_app.fingerprint_vault` as plain JSON, so it travels inside Home
+Assistant's own backups. See the repository README for the full note on that.
+
+### Scanner connection — in the Configure dialog, not the panel
+
+Which serial port the scanner is on is a **connection setting**, so it lives with the host
+and token in the config entry's **Configure** dialog (Settings → Devices & services → ekey
+module App → Configure), not on this page. What it offers depends on what the backend says,
+because only the backend knows:
 
 | Backend | What you see |
 | --- | --- |
-| **Standalone `ekey-ha-daemon`** | The port, a list of every serial port the machine has, and a Save button. A change takes effect within 30 seconds if no scanner is connected yet; otherwise it needs a daemon restart, and the panel says which |
-| **`ekey-ha-addon`** | The port, read-only. It is an add-on configuration setting — change it in the Supervisor's Configuration tab and restart the add-on |
-| **ESP32 device** | Nothing. The sensor is on fixed UART pins; there is no port to choose |
+| **Standalone `ekey-ha-daemon`** | A dropdown of every serial port the machine has. A change takes effect within 30 seconds if no scanner is connected yet; otherwise it needs a daemon restart, and the dialog says which |
+| **`ekey-ha-addon`** | Which port is in use, read-only, and where to change it: it is an add-on configuration setting, so it belongs in the Supervisor's Configuration tab |
+| **ESP32 device** | The serial entry is not offered — the sensor is on fixed UART pins. Wi-Fi push and reset are there instead |
 
-Ports flagged **system console** can be chosen but ask for confirmation first: opening one
-can switch an on-board UART into RS485 mode, which is a lasting change to a port something
-else is using.
+Ports flagged **system console** can be chosen but take a second, deliberate confirmation:
+opening one can switch an on-board UART into RS485 mode, which is a lasting change to a
+port something else is using.
 
 ## Entities
 

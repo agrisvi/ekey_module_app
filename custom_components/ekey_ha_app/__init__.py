@@ -38,7 +38,8 @@ from .enroll import EnrollManager
 from .panel import async_register_panel, async_remove_panel
 from .sse_listener import EkeySSEListener
 from .services import async_setup_services, async_unload_services
-from . import person_map, ws_api
+from .jobs import async_get_jobs
+from . import person_map, vault, ws_api
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -722,6 +723,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ws_api.async_register(hass)
         await async_register_panel(hass)
 
+        # The fingerprint database. Domain-level for the same reason the panel is:
+        # it holds one template per finger for the whole fleet, and it is what lets
+        # a fingerprint be copied from one scanner to another at all.
+        #
+        # Loaded eagerly rather than on first use so that a store which cannot be
+        # read — a file from a newer version, a permissions problem — is reported
+        # here, in the log, at startup, instead of surfacing as an empty database
+        # the first time somebody opens the panel looking for their backup.
+        try:
+            await vault.async_get_vault(hass).async_load()
+        except Exception as err:  # noqa: BLE001 — never block setup over this
+            _LOGGER.error(
+                "Could not read the fingerprint database: %s. The rest of the "
+                "integration is unaffected, but backup and restore will not work "
+                "until this is resolved — the file has been left untouched",
+                err,
+            )
+        # Constructed now so a job started from the panel does not race its
+        # creation, and so unload has something to stop.
+        async_get_jobs(hass)
+
         # Handle fingerprint match activity records
         async def handle_fingerprint_matched_activity(event):
             """Resolve person/finger from the backend, then fire the logbook event."""
@@ -884,6 +906,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not _entry_buckets(hass):
         await async_unload_services(hass)
         async_remove_panel(hass)
+        # A running transfer holds a scanner's dispatch lock item by item, so it has
+        # to be stopped before the clients it is using go away. Safe at any point:
+        # each item is atomic (one template write, one user-document write, one
+        # store save), so stopping between two of them leaves nothing half-written.
+        await async_get_jobs(hass).async_shutdown()
         hass.data[DOMAIN][_SERVICES_REGISTERED] = False
 
     return unload_ok

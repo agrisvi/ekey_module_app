@@ -31,6 +31,12 @@ API_FINGERPRINTS_ENROLL = f"{API_BASE}/fingerprints/enroll"
 API_FINGERPRINTS_ENROLL_STATE = f"{API_BASE}/fingerprints/enroll/state"
 API_FINGERPRINTS_ENROLL_CONFIRM = f"{API_BASE}/fingerprints/enroll/confirm"
 API_FINGERPRINTS_ENROLL_QUIT = f"{API_BASE}/fingerprints/enroll/quit"
+# Template transfer — how a fingerprint is copied between scanners at all. The
+# read is per-APID; the write is NOT, because the APID travels inside the blob's
+# own plaintext header and the scanner reads it there (see templates.py). Both
+# answer HTTP 200 on a scanner-level refusal, so neither may be judged by status.
+API_FINGERPRINT_TEMPLATE = f"{API_BASE}/fingerprints/{{apid}}/template"
+API_FINGERPRINTS_TEMPLATE = f"{API_BASE}/fingerprints/template"
 API_LED = f"{API_BASE}/led"
 API_LED_BRIGHTNESS = f"{API_BASE}/led/brightness"
 API_EVENTS = f"{API_BASE}/events"
@@ -71,6 +77,12 @@ EVENT_ENROLLMENT_COMPLETE = "ekey_enrollment_complete"
 EVENT_FINGERPRINT_DELETED = "ekey_fingerprint_deleted"
 EVENT_CONNECTION_LOST = "ekey_connection_lost"
 EVENT_STORAGE_UPDATED = "ekey_ha_storage_updated"
+# The fingerprint database (see vault.py). Deliberately NOT reusing
+# EVENT_STORAGE_UPDATED above: that one belongs to the person-link store and
+# carries no data, and sharing it would make each store's consumers refresh for
+# the other's reasons.
+EVENT_VAULT_JOB = "ekey_storage_job"
+EVENT_VAULT_CHANGED = "ekey_storage_changed"
 # Fired whenever the backend's user document changes, so every open panel and the
 # enrolled-fingerprint selector refresh without polling.
 EVENT_USERS_CHANGED = "ekey_users_changed"
@@ -142,3 +154,28 @@ STORAGE_VERSION = 2
 #     }
 #   }
 # }
+
+# --- The fingerprint database ------------------------------------------------
+#
+# A SECOND store, not another key inside the person store, because the two have
+# nothing in common but a domain: the person map is a few hundred bytes and is
+# read on every recognition, while this one holds ~14.6 kB of template hex per
+# finger and is touched only when a fingerprint is adopted, restored or enrolled.
+# Everything must go through vault.async_get_store() — see the note above.
+VAULT_STORAGE_KEY = f"{DOMAIN}.fingerprint_vault"
+VAULT_STORAGE_VERSION = 1
+
+# The backend's APP_HTTP_BODY_MAX. It caps the WHOLE users.json document on a
+# PUT, which is reached at roughly 30 users x 10 fingers — so a fan-out that adds
+# a finger to every scanner has to measure the document before sending it rather
+# than discover the limit as a rejected write.
+APP_HTTP_BODY_MAX = 24576
+
+# Refused before a single byte of an uploaded backup is read. A real backup of a
+# hundred fingerprints is ~1.5 MB; anything past this is not one.
+MAX_RESTORE_BYTES = 32 * 1024 * 1024
+
+# Chunk size for backup download and restore upload, in raw bytes before base64.
+# 256 KiB becomes ~350 kB of base64 per websocket message, well inside the 4 MiB
+# inbound limit aiohttp applies to what the browser sends us.
+VAULT_CHUNK_BYTES = 256 * 1024

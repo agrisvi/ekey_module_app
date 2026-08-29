@@ -249,5 +249,393 @@ console.log("serial port has moved to the options flow:");
     html.includes("Configure") && html.includes("serial port"));
 }
 
+/* The fingerprint database view. The single most important assertion in this whole
+ * file is that an unreadable scanner list renders as UNKNOWN and never as "missing":
+ * a wrongly-shown "missing" invites a minutes-long push against a guess, and a
+ * wrongly-shown "ok" hides a door that is out of step with the others. Everything
+ * else here is about the two failure modes of the view itself — mistaking the
+ * database for a scanner, and trusting a restored file's contents. */
+
+const HOSTILE = '<img src=x onerror=alert(1)>"\'&';
+
+function storagePanel(state) {
+  const p = new Panel();
+  p._mode = "storage";
+  p._scanners = [
+    { entry_id: "e1", title: "Front door", loaded: true },
+    { entry_id: "e2", title: "Back door", loaded: true },
+    { entry_id: "e3", title: "Garage", loaded: false },
+  ];
+  p._entryId = "e1";
+  p._persons = [];
+  p._storage = {
+    record_count: 2, user_count: 1, bytes: 14000, changed: 1756000000,
+    users: [{ key: "name:jane", username: "Jane", ha_person: null, fingers: [
+      { finger: 2, apid: "a".repeat(36), has_template: true, dev_variant: 10 },
+      { finger: 3, apid: "b".repeat(36), has_template: true, dev_variant: 99 },
+    ] }],
+    scanners: [
+      { entry_id: "e1", title: "Front door", loaded: true, list_known: true,
+        on_scanner: ["a".repeat(36)], on_scanner_count: 1, dev_variant: 10, template_api: true },
+      { entry_id: "e2", title: "Back door", loaded: true, list_known: true,
+        on_scanner: [], on_scanner_count: 0, dev_variant: 10, template_api: null },
+      { entry_id: "e3", title: "Garage", loaded: false, list_known: false,
+        on_scanner: [], on_scanner_count: 0, dev_variant: null, template_api: null },
+    ],
+    extras: [{ apid: "c".repeat(36), entry_ids: ["e1"], scanners: ["Front door"],
+               user_hint: "Bob", finger_hint: 1 }],
+    job: null,
+  };
+  Object.assign(p, state);
+  return p;
+}
+
+console.log("the storage dropdown entry:");
+{
+  const p = storagePanel({});
+  const head = p._renderHead();
+  check("the picker appears with a single scanner too",
+    panel({ _scanners: [{ entry_id: "e1", title: "One", loaded: true }], _entryId: "e1" })
+      ._renderHead().includes('id="scanner"'));
+  check("the storage option is present exactly once",
+    head.split('value="__storage__"').length === 2);
+  check("scanners and storage are in separate groups",
+    head.includes('<optgroup label="Scanners">') && head.includes('<optgroup label="Home Assistant">'));
+  check("storage is the selected option in storage mode",
+    /value="__storage__" selected/.test(head));
+  check("no scanner is selected in storage mode", !/value="e1" selected/.test(head));
+  check("_entryId still names a real scanner", p._entryId === "e1");
+  check("the title says which side you are on", head.includes("Fingerprint storage"));
+  check("the picker is disabled while a job runs",
+    storagePanel({ _job: { done: false } })._renderHead().includes('id="scanner" disabled'));
+}
+
+console.log("matrix chips:");
+{
+  const p = storagePanel({});
+  const record = p._storage.users[0].fingers[0];   // on e1 only, variant 10
+  const [front, back, garage] = p._storage.scanners;
+
+  check("a sensor that holds it is ok", p._cellState(record, front) === "ok");
+  check("a sensor that does not is missing", p._cellState(record, back) === "missing");
+  /* THE assertion. */
+  check("an unreadable scanner is unknown, never missing",
+    p._cellState(record, garage) === "unknown");
+  check("a variant mismatch is blocked, not missing",
+    p._cellState(p._storage.users[0].fingers[1], back) === "blocked");
+  check("a backend with no template routes is blocked",
+    p._cellState(record, { loaded: true, list_known: true, on_scanner: [], template_api: false })
+      === "blocked");
+  check("unknown wins over a variant mismatch",
+    p._cellState(p._storage.users[0].fingers[1], garage) === "unknown");
+
+  const html = p._renderStorageUsers();
+  check("the badge says on database", html.includes("on database"));
+  check("the storage card never says on scanner", !html.includes(">on scanner<"));
+  check("a missing chip names its scanner", html.includes("Back door"));
+  check("an unknown chip is rendered", html.includes("chip unknown"));
+  check("a blocked chip is rendered", html.includes("chip blocked"));
+  /* Measured on one row's chips, not on the whole card — the legend above the rows
+     lists the states in its own fixed order and would swamp the comparison. */
+  const rowChips = p._matrixChips(record).html;
+  check("deviations come before the healthy chips",
+    rowChips.indexOf("chip missing") < rowChips.indexOf("chip ok"));
+  check("a push button offers only the missing count",
+    /data-push="a+"[^>]*>Push to 1 scanner…/.test(html.replace(/\s+/g, " ")));
+
+  const noTemplate = storagePanel({});
+  noTemplate._storage.users[0].fingers[0].has_template = false;
+  const bare = noTemplate._renderStorageUsers();
+  check("a record with no template says so", bare.includes("no template stored"));
+  check("a record with no template offers no push",
+    !/data-push="a+"/.test(bare));
+}
+
+console.log("matrix degradation:");
+{
+  const one = storagePanel({});
+  one._storage.scanners = [one._storage.scanners[0]];
+  const oneHtml = one._renderStorageUsers();
+  check("one scanner renders one chip per row",
+    (oneHtml.match(/class="chip /g) || []).length > 0 && !oneHtml.includes("ok on"));
+
+  const many = storagePanel({});
+  many._storage.scanners = Array.from({ length: 8 }, (_, i) => ({
+    entry_id: `s${i}`, title: `Door ${i}`, loaded: true, list_known: true,
+    on_scanner: ["a".repeat(36)], on_scanner_count: 1, dev_variant: 10, template_api: true,
+  }));
+  many._storage.users[0].fingers = [many._storage.users[0].fingers[0]];
+  const manyHtml = many._renderStorageUsers();
+  check("eight healthy scanners collapse to one chip", manyHtml.includes("on all 8 scanners"));
+  check("the collapsed chip keeps every name in its tooltip",
+    manyHtml.includes("Door 0, Door 1"));
+
+  many._storage.scanners[3].on_scanner = [];
+  const drifted = many._renderStorageUsers();
+  check("one missing out of eight expands only that one",
+    drifted.includes("chip missing") && drifted.includes("ok on 7"));
+  check("the deviation is rendered before the collapsed chip",
+    drifted.indexOf("chip missing") < drifted.indexOf("ok on 7"));
+}
+
+console.log("storage mode versus scanner mode:");
+{
+  const p = storagePanel({});
+  p._renderShell();
+  const html = p._body.innerHTML;
+  check("the banner says it is the database", html.includes("not a scanner"));
+  check("the body is tinted via one class", p._body.className === "wrap storage");
+  check("no Add user card in storage mode", !html.includes('id="add-user"'));
+  check("the storage tools are present",
+    html.includes('id="storage-sync"') && html.includes('id="storage-backup"')
+    && html.includes('id="storage-restore"') && html.includes('id="storage-clean"'));
+  check("extras are offered for adoption", html.includes("data-adopt="));
+  /* The branch-order bug this cascade is arranged to avoid. */
+  const stale = storagePanel({ _entryId: "e3" });
+  stale._renderShell();
+  check("an unloaded last-selected scanner does not hijack the storage view",
+    !stale._body.innerHTML.includes("not loaded — it may be"));
+
+  const scanner = panel({
+    _scanners: [{ entry_id: "e1", title: "Front door", loaded: true }],
+    _entryId: "e1",
+  });
+  scanner._renderShell();
+  const scannerHtml = scanner._body.innerHTML;
+  check("scanner mode offers Sync to storage", scannerHtml.includes('id="sync-to-storage"'));
+  check("scanner mode offers a way into the database", scannerHtml.includes('id="goto-storage"'));
+  check("scanner mode is not tinted", scanner._body.className === "wrap");
+  check("scanner mode still renders its own view", scannerHtml.includes('id="start-enroll"'));
+}
+
+console.log("dialogs:");
+{
+  const base = () => storagePanel({});
+
+  const sync = base();
+  sync._dialog = { kind: "syncFrom", entryId: "e1" };
+  let html = sync._renderStorageModal();
+  check("syncFrom is an overlay", html.includes('class="modal"') && html.includes("modal-box"));
+  check("syncFrom has the dialog role",
+    html.includes('role="dialog"') && html.includes('aria-modal="true"'));
+  check("syncFrom names the count it will copy", html.includes("Copy 1 fingerprint(s)"));
+  sync._dialog.entryId = "e3";
+  check("an unreadable scanner offers no fabricated count",
+    sync._renderStorageModal().includes("Copy all fingerprints"));
+  sync._dialog = { kind: "syncFrom", entryId: "e1", busy: true };
+  check("syncFrom shows a busy state", sync._renderStorageModal().includes("Starting…"));
+
+  const to = base();
+  to._mode = "scanner";
+  to._data = { app_api: true, users: [], unassigned: [], missing: [], scanner_list_known: true };
+  to._dialog = { kind: "syncTo", entryId: "e1", preview: null };
+  check("syncTo shows a loading state first",
+    to._renderScannerModal().includes("Reading this scanner"));
+  to._dialog.preview = { list_known: false, items: [] };
+  check("syncTo offers NO continue over an unreadable list",
+    !to._renderScannerModal().includes('id="st-go"'));
+  to._dialog.preview = { list_known: true, new_count: 1, known_count: 1, items: [
+    { apid: "a".repeat(36), user_hint: "Jane", finger_hint: 2, in_database: true },
+    { apid: "c".repeat(36), user_hint: null, finger_hint: null, in_database: false },
+  ] };
+  html = to._renderScannerModal();
+  check("syncTo previews what it will take in", html.includes('id="st-go"'));
+  check("syncTo marks what is already stored", html.includes("already in the database"));
+  check("syncTo names an unassigned fingerprint", html.includes("unassigned on this scanner"));
+
+  const backup = base();
+  backup._dialog = { kind: "backup", encrypt: true };
+  html = backup._renderStorageModal();
+  check("backup asks for a passphrase twice",
+    html.includes('id="bk-pass"') && html.includes('id="bk-pass2"'));
+  check("backup warns a lost passphrase is a lost backup", html.includes("lost backup"));
+  backup._dialog.encrypt = false;
+  html = backup._renderStorageModal();
+  check("the unencrypted option drops the passphrase fields", !html.includes('id="bk-pass"'));
+  check("the unencrypted option warns what the file contains",
+    html.includes("plain text") && html.includes("another"));
+
+  const restore = base();
+  restore._dialog = { kind: "restore" };
+  check("restore starts with a file picker",
+    restore._renderStorageModal().includes('id="rs-file"'));
+  restore._dialog = { kind: "restore", file: { name: "b.ekeybak", size: 1000 },
+                      uploading: true, chunks: 4, sent: 2 };
+  html = restore._renderStorageModal();
+  check("the file input is GONE once a file is chosen", !html.includes('id="rs-file"'));
+  check("the upload shows progress", html.includes('role="progressbar"'));
+  restore._dialog = { kind: "restore", file: { name: "b.ekeybak", size: 1000 },
+    needsPassphrase: true, header: { encryption: {}, record_count: 27, user_count: 6,
+      created: "2026-08-28", created_by: "1.4.0" } };
+  html = restore._renderStorageModal();
+  check("a locked file asks for the passphrase", html.includes('id="rs-pass"'));
+  check("a locked file says what it CLAIMS to hold", html.includes("It says it holds"));
+  restore._dialog = { kind: "restore", file: { name: "b.ekeybak", size: 1000 },
+    header: { encryption: {}, created: "x", created_by: "y" }, mode: "replace", problems: [],
+    preview: { record_count: 5, new_count: 2, refresh_count: 3, db_only_count: 2,
+               users: [{ username: "Jane", new: 2, known: 1, total: 3 }] } };
+  html = restore._renderStorageModal();
+  check("the preview offers merge or replace", html.includes('id="rs-mode"'));
+  check("replacing with deletes demands an acknowledgement", html.includes('id="rs-ack"'));
+  check("the restore button is dangerous when it deletes", /id="rs-go" class="danger"/.test(html));
+  check("the preview says a restore writes to no scanner",
+    html.includes("Nothing is written to any scanner"));
+
+  const clean = base();
+  clean._dialog = { kind: "clean" };
+  html = clean._renderStorageModal();
+  check("clean demands a typed word", html.includes('id="cl-word"'));
+  check("clean starts with its button disabled", /id="cl-go" disabled/.test(html));
+  check("clean says the scanners keep working", html.includes("keeps working"));
+  check("clean names how much is lost", html.includes("Delete all 2 record(s)"));
+}
+
+console.log("job report:");
+{
+  const running = storagePanel({ _job: {
+    job_id: "j1", title: "Copying from “Front door”", phase: "running", index: 7, total: 12,
+    counts: { ok: 6, skipped: 1, failed: 0 }, message: "Copying 7 of 12", done: false,
+    items: [
+      { apid: "a".repeat(36), label: "Jane · finger 2", state: "ok", scanner: "Front door" },
+      { apid: "b".repeat(36), label: "Bob · finger 1", state: "skipped",
+        reason: "variant_mismatch", scanner: "Garage", detail: "different device variant" },
+    ],
+  } });
+  let html = running._renderJob();
+  check("a running job is an overlay", html.includes('class="modal"'));
+  check("a running job shows progress", html.includes('aria-valuenow="7"'));
+  check("a running job offers Stop", html.includes('id="job-stop"'));
+  check("a running job offers no Close", !html.includes('id="job-close"'));
+  check("newest item first while running",
+    html.indexOf("Bob · finger 1") < html.indexOf("Jane · finger 2"));
+  check("stopping keeps what was done", html.includes("already copied are kept"));
+  check("a job cannot be dismissed while running", running._dialogLocked() === true);
+
+  running._job.cancelling = true;
+  check("cancelling says so", running._renderJob().includes("Stopping…"));
+
+  const partial = storagePanel({ _job: {
+    job_id: "j1", title: "t", total: 30, index: 30, done: true, ok: false,
+    counts: { ok: 27, skipped: 2, failed: 1 }, message: "m",
+    items: [
+      { apid: "a".repeat(36), label: "ok one", state: "ok" },
+      { apid: "b".repeat(36), label: "skipped one", state: "skipped", reason: "variant_mismatch" },
+      { apid: "c".repeat(36), label: "failed one", state: "failed", reason: "sensor_full" },
+    ],
+  } });
+  html = partial._renderJob();
+  check("a partial result reports all three counts",
+    html.includes("27 done, 2 skipped,") && html.includes("1 failed"));
+  check("a partial result says the failures changed nothing",
+    html.includes("changed nothing"));
+  check("failures are listed before successes",
+    html.indexOf("failed one") < html.indexOf("ok one"));
+  check("only failures are offered a retry", html.includes("Retry the 1 that failed"));
+  check("a finished job can be closed", html.includes('id="job-close"'));
+  check("a finished job is dismissible", partial._dialogLocked() === false);
+
+  const clean = storagePanel({ _job: {
+    job_id: "j1", title: "t", total: 3, index: 3, done: true, ok: true,
+    counts: { ok: 3, skipped: 0, failed: 0 }, items: [], message: "m",
+  } });
+  check("an all-ok job says verified", clean._renderJob().includes("verified"));
+  check("an all-ok job offers no retry", !clean._renderJob().includes('id="job-retry"'));
+
+  const stopped = storagePanel({ _job: {
+    job_id: "j1", title: "t", total: 30, index: 7, done: true, ok: false, cancelled: true,
+    counts: { ok: 7, skipped: 0, failed: 0 }, items: [], message: "m",
+  } });
+  check("a stopped job says how far it got",
+    stopped._renderJob().includes("Stopped — 7 of 30"));
+
+  /* A job must win over a picker: it is the only report of a live operation. */
+  const both = storagePanel({ _dialog: { kind: "clean" }, _job: { job_id: "j", done: false,
+    title: "t", total: 1, index: 0, counts: { ok: 0, skipped: 0, failed: 0 }, items: [] } });
+  check("a running job beats an open dialog",
+    both._renderStorageModal().includes('id="job-modal"')
+    && !both._renderStorageModal().includes('id="dlg"'));
+}
+
+console.log("untrusted input from a backup file:");
+{
+  const p = storagePanel({});
+  p._storage.users[0].username = HOSTILE;
+  let html = p._renderStorageUsers();
+  check("a hostile username is escaped in the body", html.includes("&lt;img"));
+  check("no raw img tag survives", !html.includes("<img src=x"));
+
+  /* The chips are the new risk: this view puts untrusted text into title= and
+     aria-label=, which the old one never did. */
+  const attr = storagePanel({});
+  attr._storage.scanners[1].title = 'x" onmouseover="alert(1)';
+  html = attr._renderStorageUsers();
+  check("a hostile scanner title cannot break out of an attribute",
+    !html.includes('onmouseover="'));
+
+  const restore = storagePanel({});
+  restore._dialog = { kind: "restore", file: { name: HOSTILE, size: 10 },
+    header: { encryption: null, created: HOSTILE, created_by: HOSTILE }, problems: [HOSTILE],
+    preview: { record_count: 1, new_count: 1, refresh_count: 0, db_only_count: 0,
+               users: [{ username: HOSTILE, new: 1, known: 0, total: 1 }] } };
+  html = restore._renderStorageModal();
+  check("a hostile filename is escaped", !html.includes("<img src=x"));
+  check("a hostile username from a file is escaped", html.includes("&lt;img"));
+  /* Escaping neutralises the tag; it does not delete the words. The test is that
+     no live markup survives, not that the text is gone. */
+  check("hostile header text cannot open a tag", !html.includes("<img"));
+  check("hostile header text arrives escaped", html.includes("&lt;img"));
+
+  const job = storagePanel({ _job: { job_id: "j", title: HOSTILE, total: 1, index: 1,
+    done: true, ok: false, counts: { ok: 0, skipped: 0, failed: 1 }, message: HOSTILE,
+    items: [{ apid: HOSTILE, label: HOSTILE, state: "failed", detail: HOSTILE }] } });
+  check("hostile job text is escaped", !job._renderJob().includes("<img src=x"));
+
+  /* Clipping must happen before escaping: slicing an escaped string can cut
+     "&quot;" into "&quot", which a browser still resolves inside an attribute. */
+  const long = storagePanel({});
+  long._storage.scanners[1].title = `${"y".repeat(118)}"`;
+  html = long._renderStorageUsers();
+  check("clipping does not leave a half-written entity", !/&quot(?!;)/.test(html));
+
+  const many = storagePanel({});
+  many._dialog = { kind: "restore", file: { name: "b", size: 1 }, header: {}, problems: [],
+    preview: { record_count: 500, new_count: 500, refresh_count: 0, db_only_count: 0,
+      users: Array.from({ length: 500 }, (_, i) => ({ username: `U${i}`, new: 1, known: 0, total: 1 })) } };
+  html = many._renderStorageModal();
+  check("a huge preview is clipped", html.includes("and 450 more user(s)"));
+}
+
+console.log("base64 helpers:");
+{
+  /* The chunked walk exists because btoa(String.fromCharCode(...bytes)) blows the
+     argument limit somewhere around 100k, and one template alone is 14 kB. A bug
+     here would not raise — it would produce a backup that cannot be restored. */
+  const { bytesToB64, b64ToBytes, clip, humanBytes } = Panel.helpers;
+
+  const size = 300 * 1024;
+  const bytes = new Uint8Array(size);
+  for (let i = 0; i < size; i++) bytes[i] = (i * 31 + 7) & 0xff;
+
+  const round = b64ToBytes(bytesToB64(bytes));
+  check("a 300 kB round trip preserves the length", round.length === size);
+  check("a 300 kB round trip preserves every byte",
+    round.every((value, index) => value === bytes[index]));
+  check("an empty buffer round trips", b64ToBytes(bytesToB64(new Uint8Array(0))).length === 0);
+  check("a single byte round trips", b64ToBytes(bytesToB64(new Uint8Array([0xff])))[0] === 0xff);
+  /* Exactly on the 0x8000 window boundary, where an off-by-one would hide. */
+  const edge = new Uint8Array(0x8000 * 2);
+  edge[0x8000 - 1] = 0xaa;
+  edge[0x8000] = 0xbb;
+  const edgeBack = b64ToBytes(bytesToB64(edge));
+  check("the chunk boundary is not off by one",
+    edgeBack[0x8000 - 1] === 0xaa && edgeBack[0x8000] === 0xbb);
+
+  check("clip shortens and marks", clip("x".repeat(200), 10) === `${"x".repeat(9)}…`);
+  check("clip leaves short text alone", clip("short", 10) === "short");
+  check("clip tolerates null", clip(null) === "");
+  check("humanBytes reads in kB", humanBytes(14582) === "14.2 kB");
+  check("humanBytes reads in MB", humanBytes(1500000) === "1.4 MB");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
