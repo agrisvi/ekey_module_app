@@ -1,7 +1,7 @@
 """Logbook support for ekey Home Assistant App."""
 from homeassistant.core import HomeAssistant, callback
 
-from .const import EVENT_ACCESS_GRANTED, EVENT_ACCESS_DENIED
+from .const import DOMAIN, EVENT_ACCESS_GRANTED, EVENT_ACCESS_DENIED
 
 
 @callback
@@ -33,5 +33,8 @@ def async_describe_events(
             result["entity_id"] = entity_id
         return result
 
-    async_describe_event(EVENT_ACCESS_GRANTED, describe_access_granted)
-    async_describe_event(EVENT_ACCESS_DENIED, describe_access_denied)
+    # (domain, event_name, describe_callback) — three arguments. Called with two, the
+    # whole logbook platform fails to load with a TypeError at startup, and every ekey
+    # access event then appears in the logbook as a raw event with no description.
+    async_describe_event(DOMAIN, EVENT_ACCESS_GRANTED, describe_access_granted)
+    async_describe_event(DOMAIN, EVENT_ACCESS_DENIED, describe_access_denied)

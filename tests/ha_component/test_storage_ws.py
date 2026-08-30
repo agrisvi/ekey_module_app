@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.ekey_ha_app import ws_api
+from custom_components.ekey_ha_app import jobs as jobs_mod
 from custom_components.ekey_ha_app import vault as vault_mod
 from custom_components.ekey_ha_app.api import EkeyAppClient
 from custom_components.ekey_ha_app.backup import create
@@ -667,3 +668,173 @@ async def test_a_second_job_is_refused_with_its_own_error_code(monkeypatch):
 
     assert conn.errors[0][0] == "job_running"
     assert "already running" in conn.errors[0][1]
+
+
+# ------------------------------------------------- reading the scanners, or not
+
+
+def _counts_refreshes(hass, entry_id="e1"):
+    """Count the "go and ask that scanner" calls, and let one change its answer."""
+    app = hass.data[DOMAIN][entry_id]["app_coordinator"]
+    calls = []
+
+    async def refresh():
+        calls.append(entry_id)
+
+    app.async_refresh_now = refresh
+    return calls, app
+
+
+async def test_the_view_can_ask_the_scanners_or_read_the_snapshot():
+    """Refresh has to mean "ask them". It used to re-read Home Assistant's own
+    five-minute-old snapshot, so pressing it re-rendered an identical page."""
+    hass, _, _, vault = build()
+    await stock(vault)
+    calls, _ = _counts_refreshes(hass)
+
+    await call(hass, ws_api.ws_storage_get, Connection(), {"id": 1})
+    assert calls == [], "an ordinary load must not poll every scanner"
+
+    await call(hass, ws_api.ws_storage_get, Connection(), {"id": 2, "refresh": True})
+    assert calls == ["e1"]
+
+
+async def test_a_refresh_changes_what_the_matrix_says():
+    """End to end: the cached picture says the scanner holds it, the scanner says
+    otherwise, and the refreshed view reports the scanner."""
+    hass, _, _, vault = build(on_scanner=[REAL_APID_A])
+    await stock(vault)
+    _, app = _counts_refreshes(hass)
+
+    async def refresh():
+        app.data = {**app.data, "scanner_aps": []}
+
+    app.async_refresh_now = refresh
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_get, conn, {"id": 1, "refresh": True})
+
+    assert conn.result["scanners"][0]["on_scanner"] == []
+
+
+async def test_a_scanner_that_went_quiet_is_unknown_not_last_seen():
+    """A failed refresh keeps the previous data — which must not be reported as
+    current, or a push writes against a list from minutes ago."""
+    hass, _, _, vault = build(on_scanner=[REAL_APID_A])
+    await stock(vault)
+    app = hass.data[DOMAIN]["e1"]["app_coordinator"]
+    app.last_update_success = False
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_get, conn, {"id": 1})
+
+    row = conn.result["scanners"][0]
+    assert row["list_known"] is False
+    assert row["on_scanner"] == [], "the stale list must not be handed out"
+
+
+async def test_every_row_says_when_it_was_read():
+    hass, _, _, vault = build()
+    await stock(vault)
+    hass.data[DOMAIN]["e1"]["app_coordinator"].data["read_at"] = 1756500000.0
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_get, conn, {"id": 1})
+
+    assert conn.result["scanners"][0]["as_of"] == 1756500000.0
+
+
+async def test_an_unloaded_scanner_still_has_the_field():
+    hass, _, _, _ = build(loaded=False)
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_get, conn, {"id": 1})
+
+    assert conn.result["scanners"][0]["as_of"] is None
+
+
+async def test_the_preview_reads_the_list_it_is_about_to_copy():
+    """Approving a copy of a list nobody re-read is approving what it looked like
+    minutes ago."""
+    hass, _, _, _ = build(on_scanner=[])
+    _, app = _counts_refreshes(hass)
+
+    async def refresh():
+        app.data = {**app.data, "scanner_aps": [REAL_APID_A]}
+
+    app.async_refresh_now = refresh
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_scanner_preview, conn, {"id": 1, "entry_id": "e1"})
+
+    assert [i["apid"] for i in conn.result["items"]] == [REAL_APID_A]
+
+
+# ------------------------------------------------- enrol and purge (phase 2)
+
+
+async def test_a_purge_confirmation_must_name_the_fingerprint(monkeypatch):
+    """Re-checked server-side. The panel is not the only possible caller, and a
+    delete that reaches every scanner is not something to take on trust."""
+    hass, _, _, vault = build()
+    await stock(vault)
+    started = []
+    monkeypatch.setattr(
+        async_get_jobs(hass), "async_purge_fingerprint",
+        lambda apid: started.append(apid) or {"job_id": "j"},
+    )
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_purge_fingerprint, conn,
+               {"id": 1, "apid": REAL_APID_A, "confirm": REAL_APID_B})
+
+    assert conn.errors and conn.errors[0][0] == ws_api.ERR_INVALID
+    assert "does not name" in conn.errors[0][1]
+    assert started == [], "and no job was started"
+
+    await call(hass, ws_api.ws_storage_purge_fingerprint, Connection(),
+               {"id": 2, "apid": REAL_APID_A, "confirm": REAL_APID_A})
+    assert started == [REAL_APID_A]
+
+
+async def test_purging_is_admin_only():
+    from homeassistant.exceptions import Unauthorized
+
+    hass, _, _, vault = build()
+    await stock(vault)
+    conn = Connection(admin=False)
+
+    with pytest.raises(Unauthorized):
+        await call(hass, ws_api.ws_storage_purge_fingerprint, conn,
+                   {"id": 1, "apid": REAL_APID_A, "confirm": REAL_APID_A})
+
+    assert REAL_APID_A in vault.data["records"]
+
+
+async def test_enrolling_is_admin_only():
+    from homeassistant.exceptions import Unauthorized
+
+    hass, _, _, _ = build()
+    conn = Connection(admin=False)
+
+    with pytest.raises(Unauthorized):
+        await call(hass, ws_api.ws_storage_enroll, conn,
+                   {"id": 1, "entry_id": "e1", "user_id": "u1", "finger": 3})
+
+
+async def test_an_unknown_scanner_says_so_rather_than_raising(monkeypatch):
+    """UnknownScannerJob carries a reason worth repeating — a backend with no app
+    layer cannot enrol, and "unknown entry_id" would be the wrong explanation."""
+    hass, _, _, _ = build()
+
+    async def refuse(entry_id, user_id, finger):
+        raise jobs_mod.UnknownScannerJob("“Front door” cannot enrol — no app layer")
+
+    monkeypatch.setattr(async_get_jobs(hass), "async_enroll", refuse)
+    conn = Connection()
+
+    await call(hass, ws_api.ws_storage_enroll, conn,
+               {"id": 1, "entry_id": "e1", "user_id": "u1", "finger": 3})
+
+    assert conn.errors[0][0] == "not_found"
+    assert "cannot enrol" in conn.errors[0][1]

@@ -40,7 +40,13 @@ from .const import (
     EVENT_VAULT_JOB,
 )
 from .enroll import EVENT_ENROLL_PROGRESS, EnrollError
-from .jobs import TEMPLATE_API_KEY, JobBusy, async_get_jobs
+from .jobs import (
+    TEMPLATE_API_KEY,
+    JobBusy,
+    UnknownScannerJob,
+    async_get_jobs,
+    async_refresh_scanners,
+)
 from .panel import PANEL_VERSION_KEY
 from .person_map import user_person
 from .transfers import async_get_transfers
@@ -117,14 +123,19 @@ def _handle_errors(func):
     async def wrapper(hass, connection, msg):
         try:
             await func(hass, connection, msg)
-        except UnknownScanner:
-            # Only THIS KeyError means what the message says. A bare `except
+        except (UnknownScanner, UnknownScannerJob) as err:
+            # Only THESE KeyErrors mean what the message says. A bare `except
             # KeyError` here used to report any dictionary slip inside any command
             # as "that scanner is not set up", which is a wrong answer that costs
             # real debugging time; other KeyErrors now surface as themselves, with
-            # a traceback in the log.
+            # a traceback in the log. A job raises its own type, and carries a
+            # reason worth repeating (a scanner with no app layer cannot enrol).
+            detail = str(err.args[0]) if err.args else ""
             connection.send_error(
-                msg["id"], ERR_NOT_FOUND, "that scanner is not set up (unknown entry_id)"
+                msg["id"],
+                ERR_NOT_FOUND,
+                detail if isinstance(err, UnknownScannerJob) and detail
+                else "that scanner is not set up (unknown entry_id)",
             )
         except (EkeyApiError, EnrollError, JobBusy, ValueError) as err:
             _fail(connection, msg, err)
@@ -151,6 +162,8 @@ def async_register(hass: HomeAssistant) -> None:
         ws_storage_scanner_preview,
         ws_storage_sync_from_scanner,
         ws_storage_push,
+        ws_storage_enroll,
+        ws_storage_purge_fingerprint,
         ws_storage_clean,
         ws_storage_job_cancel,
         ws_storage_backup_begin,
@@ -231,6 +244,7 @@ async def ws_persons(hass: HomeAssistant, connection, msg) -> None:
     {
         vol.Required("type"): "ekey_ha_app/users/get",
         vol.Required("entry_id"): str,
+        vol.Optional("refresh", default=False): bool,
     }
 )
 @websocket_api.require_admin
@@ -241,8 +255,15 @@ async def ws_users_get(hass: HomeAssistant, connection, msg) -> None:
 
     ``unassigned`` and ``missing`` are the two states an installer has to be able
     to act on, and neither is visible from the user list alone.
+
+    ``refresh`` re-reads the scanner first. Everything here is served from the
+    coordinator's snapshot, and that poll is five minutes apart — so a Refresh
+    button that did not set this would re-render the same picture and look broken,
+    which is exactly what it did.
     """
     rt = _runtime(hass, msg["entry_id"])
+    if msg.get("refresh"):
+        await rt.coordinator.async_refresh_now()
     data = rt.coordinator.data or {}
     if not data.get("app_api"):
         connection.send_result(
@@ -620,6 +641,7 @@ def _scanner_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
                     "dev_variant": None,
                     "prod_sn": None,
                     "template_api": None,
+                    "as_of": None,
                 }
             )
             continue
@@ -628,7 +650,11 @@ def _scanner_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
         scanner = bucket.get("coordinator")
         app_data = getattr(app, "data", None) or {}
         device = (getattr(scanner, "data", None) or {}).get("device") or {}
-        known = bool(app_data.get("scanner_list_known"))
+        # A failed refresh leaves the previous data in place, so the flag alone
+        # would keep reporting the list this scanner held before it went quiet.
+        # Stale is unknown, and unknown is never missing.
+        fresh = bool(getattr(app, "last_update_success", True))
+        known = fresh and bool(app_data.get("scanner_list_known"))
         aps = app_data.get("scanner_aps") if known else None
         on_scanner = [a for a in aps if isinstance(a, str)] if isinstance(aps, list) else []
 
@@ -646,6 +672,9 @@ def _scanner_rows(hass: HomeAssistant) -> list[dict[str, Any]]:
                 # jobs.remember_template_api for why this is learned rather than
                 # probed. False means an older backend that cannot take part.
                 "template_api": bucket.get(TEMPLATE_API_KEY),
+                # When this row was actually read off the scanner, so the view can
+                # say how old the comparison is instead of implying it is live.
+                "as_of": app_data.get("read_at"),
             }
         )
     return rows
@@ -693,7 +722,12 @@ def _extras(hass: HomeAssistant, rows: list[dict[str, Any]], known: set[str]):
     return sorted(seen.values(), key=lambda r: r["apid"])
 
 
-@websocket_api.websocket_command({vol.Required("type"): "ekey_ha_app/storage/get"})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ekey_ha_app/storage/get",
+        vol.Optional("refresh", default=False): bool,
+    }
+)
 @websocket_api.require_admin
 @websocket_api.async_response
 @_handle_errors
@@ -706,9 +740,17 @@ async def ws_storage_get(hass: HomeAssistant, connection, msg) -> None:
 
     The running job is folded in so a page that loads mid-job adopts it, the same
     way ``users/get`` hands over the live enrolment.
+
+    ``refresh`` asks every scanner for its current list first. The panel sets it
+    when the view is opened and when Refresh is pressed, and leaves it off for the
+    reloads an event triggers — those follow a change this integration just made,
+    and a burst of them must not turn into a burst of RS-485 round trips.
     """
     vault = vault_mod.async_get_vault(hass)
     await vault.async_load()
+
+    if msg.get("refresh"):
+        await async_refresh_scanners(hass)
 
     rows = _scanner_rows(hass)
     view = vault_mod.build_records_view(vault.data)
@@ -731,11 +773,15 @@ async def ws_storage_scanner_preview(hass: HomeAssistant, connection, msg) -> No
     """What copying *this* scanner into the database would take in.
 
     Shown before anything happens, because the alternative is asking someone to
-    approve a minutes-long operation over a list they cannot see.
+    approve a minutes-long operation over a list they cannot see. That list is read
+    from the scanner first: approving a copy of a list that is minutes old is the
+    same as not seeing it.
     """
     vault = vault_mod.async_get_vault(hass)
     await vault.async_load()
     stored = vault_mod.stored_apids(vault.data)
+
+    await async_refresh_scanners(hass, [msg["entry_id"]])
 
     rows = {row["entry_id"]: row for row in _scanner_rows(hass)}
     row = rows.get(msg["entry_id"])
@@ -820,6 +866,59 @@ async def ws_storage_push(hass: HomeAssistant, connection, msg) -> None:
     status = await async_get_jobs(hass).async_push(
         msg.get("apids"), msg.get("entry_ids")
     )
+    connection.send_result(msg["id"], status)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ekey_ha_app/storage/enroll",
+        vol.Required("entry_id"): str,
+        vol.Required("user_id"): str,
+        vol.Required("finger"): vol.All(int, vol.Range(min=1, max=MAX_FINGER)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_handle_errors
+async def ws_storage_enroll(hass: HomeAssistant, connection, msg) -> None:
+    """Enrol on one scanner, then copy the result to every other one.
+
+    The same enrollment the scanner page runs — same manager, same session, same
+    progress — wrapped in a job that continues afterwards: the template goes into
+    the database and out to the rest of the fleet, so one presentation of a finger
+    produces one identity on every door instead of one per door.
+    """
+    status = await async_get_jobs(hass).async_enroll(
+        msg["entry_id"], msg["user_id"], msg["finger"]
+    )
+    connection.send_result(msg["id"], status)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ekey_ha_app/storage/purge_fingerprint",
+        vol.Required("apid"): str,
+        vol.Required("confirm"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_handle_errors
+async def ws_storage_purge_fingerprint(hass: HomeAssistant, connection, msg) -> None:
+    """Delete one fingerprint from every scanner, and from the database last.
+
+    ``confirm`` must be the APID being deleted. Checked here rather than trusted
+    from the panel for the same reason ``storage/clean`` re-checks its word: this is
+    reachable from anything holding an admin token, and the panel is not the only
+    possible caller.
+    """
+    apid = str(msg["apid"]).strip().lower()
+    if str(msg["confirm"]).strip().lower() != apid:
+        # ValueError, not vol.Invalid: voluptuous's Invalid is not a ValueError, so
+        # it escapes _handle_errors and surfaces as an unhandled exception instead of
+        # the refusal it is. Same shape as storage/clean's word check.
+        raise ValueError("the confirmation does not name the fingerprint to delete")
+    status = await async_get_jobs(hass).async_purge_fingerprint(apid)
     connection.send_result(msg["id"], status)
 
 

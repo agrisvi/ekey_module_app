@@ -129,6 +129,25 @@ def _async_retired_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> list[s
 
 
 @callback
+def _apid_claimed_anywhere(hass: HomeAssistant, apid: str) -> bool:
+    """Is this enrollment owned by EnrollManager on ANY configured scanner?
+
+    Fleet-wide, not per-entry, and that distinction is the whole point. An APID is a
+    uuid4 minted once per enrollment, so "claimed here" and "claimed at all" are the
+    same question — but two backends wired to the same RS-485 bus both see the same
+    sensor's NOTIFY_AP_ENROLL_STATE frames. Checking only this entry's claims meant
+    the *other* entries' listeners treated a panel-owned enrollment as an orphan and
+    auto-confirmed it, racing the real confirmation. That is what produced a pair of
+    "Enrollment confirmation failed with response: ERROR" on every panel enrollment,
+    and a second CONFIRM against a live session is not a harmless duplicate.
+    """
+    for bucket in (hass.data.get(DOMAIN) or {}).values():
+        if isinstance(bucket, dict) and apid in (bucket.get("panel_enrollments") or {}):
+            return True
+    return False
+
+
+@callback
 def _async_check_retired_references(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Raise a repair when an automation or script still points at a retired entity.
 
@@ -380,7 +399,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # confirms once and deliberately. This listener auto-confirms every APID it
         # sees, so it must stay out of the way — two confirmations for one session
         # is a real failure mode, not a harmless duplicate.
-        if apid in hass.data[DOMAIN][entry.entry_id].get("panel_enrollments", {}):
+        if _apid_claimed_anywhere(hass, apid):
             return
 
         pending = hass.data[DOMAIN][entry.entry_id].get("pending_enrollments", {})
@@ -550,7 +569,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Panel-owned enrollments write to the backend's user document, not to the
         # legacy HA store — see the guard in handle_enrollment_state.
-        if apid and apid in hass.data[DOMAIN][entry.entry_id].get("panel_enrollments", {}):
+        if apid and _apid_claimed_anywhere(hass, apid):
             return
 
 
@@ -701,11 +720,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ...and then, once the automations are loaded, tell the user if any of them was
     # still using one. Removing the rows silently is what leaves somebody staring at
     # an empty entity picker with no idea why.
-    entry.async_on_unload(
-        async_at_started(
-            hass, lambda _hass: _async_check_retired_references(hass, entry)
-        )
-    )
+    # A @callback-decorated wrapper, not a bare lambda. Home Assistant decides where
+    # to run this by inspecting the callable it is HANDED — and a lambda carries no
+    # such marking however the function inside it is decorated, so it was dispatched
+    # to a worker thread. From there ir.async_delete_issue trips
+    # verify_event_loop_thread and raises, which for a custom integration is now a
+    # hard error rather than a warning.
+    @callback
+    def _check_retired(_hass: HomeAssistant) -> None:
+        _async_check_retired_references(hass, entry)
+
+    entry.async_on_unload(async_at_started(hass, _check_retired))
 
     # Forward the setup to platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

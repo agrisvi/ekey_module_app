@@ -28,6 +28,12 @@ const FINGER_COUNT = 10;
    `users/get` answer "that scanner is not set up" — both silently. */
 const STORAGE_ID = "__storage__";
 
+/* Where the last "Scanner or storage" choice is remembered, so the page reopens where
+   it was left rather than always on the first scanner. Per browser, not per Home
+   Assistant user, and it holds nothing sensitive: which of the two views was open and
+   an entry id that is already visible in the picker. */
+const SELECTION_KEY = "ekey-panel.selection";
+
 /* Below this many scanners, never collapse the healthy chips: with three columns
    the whole row fits and collapsing hides information for no gain. At four and up,
    the healthy ones fold into one chip so that deviations stand out. */
@@ -214,6 +220,20 @@ function humanBytes(count) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/* How old the scanner comparison is. The matrix is only ever as good as its last
+   read, and the backing poll is five minutes apart — so showing that picture with
+   no age on it is how a fingerprint deleted from a door keeps looking present. */
+function ago(epochSeconds) {
+  if (!epochSeconds) return "not yet";
+  const delta = Math.max(0, Math.round(Date.now() / 1000 - Number(epochSeconds)));
+  if (delta < 10) return "just now";
+  if (delta < 90) return `${delta} seconds ago`;
+  const minutes = Math.round(delta / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+}
+
 class EkeyPanel extends HTMLElement {
   constructor() {
     super();
@@ -231,6 +251,8 @@ class EkeyPanel extends HTMLElement {
     this._message = null;      // { text, kind }
     this._loading = false;
     this._unsub = null;
+    this._generation = 0;      // bumped by _teardown; see _subscribe
+    this._refreshing = false;  // a "go and ask the scanners" read is in flight
     this._booted = false;
 
     /* Which view is showing. `_entryId` keeps naming a real scanner in both modes —
@@ -302,6 +324,9 @@ class EkeyPanel extends HTMLElement {
   }
 
   _teardown() {
+    /* Bumped on every teardown so a subscribe still in flight can tell that the view
+       it belongs to is gone — see _subscribe. */
+    this._generation += 1;
     if (this._unsub) {
       const unsub = this._unsub;
       this._unsub = null;
@@ -320,6 +345,93 @@ class EkeyPanel extends HTMLElement {
     this._render();
   }
 
+  /* The picker's choice outlives the page. Every access to localStorage is wrapped:
+     it throws outright in a private window, with site data blocked, and in a
+     partitioned iframe — and not remembering a dropdown is not worth an error. */
+  _recallSelection() {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(SELECTION_KEY));
+      return saved && typeof saved === "object" ? saved : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  _rememberSelection() {
+    try {
+      window.localStorage.setItem(
+        SELECTION_KEY,
+        JSON.stringify({ mode: this._mode, entry_id: this._entryId }),
+      );
+    } catch (err) {
+      /* Nothing to do and nothing to say: the panel still works, it just opens on
+         the first scanner next time. */
+    }
+  }
+
+  /* Checked against the live scanner list, never trusted: a remembered scanner that
+     has since been deleted must not leave the picker naming something that is gone,
+     and a remembered mode must not resurrect STORAGE_ID as an entry id. */
+  _applySelection(saved) {
+    if (!saved) return;
+    if (saved.entry_id && this._scanners.some((s) => s.entry_id === saved.entry_id)) {
+      this._entryId = saved.entry_id;
+    }
+    /* Only when there is a picker to leave by. With no scanners configured the head
+       would render the storage title while the body renders "No ekey scanner is
+       configured yet" — and the picker is not drawn at all, so that state has no exit
+       and the next load would restore it again. Storage mode is only ever entered
+       from a control that needs a scanner to exist, so this simply keeps it that way. */
+    if (saved.mode === "storage" && this._scanners.length) this._mode = "storage";
+  }
+
+  /* The one way into either view. The dropdown and the "Open fingerprint storage"
+     button used to do this separately and cleared different things — the button left
+     an open dialog, a half-finished edit and the picker's own state on screen under
+     the other view's title. */
+  async _selectMode(value) {
+    this._mode = value === STORAGE_ID ? "storage" : "scanner";
+    /* Only a real scanner is ever stored: the sentinel must not reach the backend —
+       see STORAGE_ID. Keeping the last scanner selected also means switching back
+       needs no extra round trip. */
+    if (this._mode === "scanner" && value) this._entryId = value;
+    this._editing = null;
+    this._enrollOpen = false;
+    this._enroll = null;
+    this._dialog = null;
+    this._message = null;
+    this._formCache = {};
+    /* Dropped rather than left standing. Both are about to be re-read, and showing
+       the previous scanner's users — or the previous database snapshot — under the
+       new title for the length of a round trip does not read as stale, it reads as
+       that scanner's data. The empty card says "reading" and means it. */
+    this._data = null;
+    this._storage = null;
+    this._rememberSelection();
+    await this._subscribe();
+    /* Opening a view is a question about the scanners, so ask them. Especially the
+       storage view, whose entire content is a comparison between them. */
+    await this._load({ refresh: true });
+  }
+
+  /* Refresh means "go and ask the scanners", not "re-render what we already had".
+     It used to re-read Home Assistant's cached snapshot, which the five-minute poll
+     fills — so pressing it produced an identical page and looked like a dead
+     button, and the matrix kept showing a fingerprint on a door it had been
+     deleted from. */
+  async _refresh() {
+    if (this._refreshing) return;
+    this._refreshing = true;
+    this._message = null;
+    this._render();
+    try {
+      await this._load({ refresh: true });
+    } finally {
+      this._refreshing = false;
+      this._render();
+    }
+  }
+
   async _boot() {
     this._renderShell();
     try {
@@ -331,25 +443,32 @@ class EkeyPanel extends HTMLElement {
       this._persons = (persons && persons.persons) || [];
       const loaded = this._scanners.find((s) => s.loaded);
       this._entryId = (loaded || this._scanners[0] || {}).entry_id || null;
+      this._applySelection(this._recallSelection());
     } catch (err) {
       this._say(`Could not read the scanner list: ${err.message || err}`, "err");
       return;
     }
     await this._subscribe();
-    await this._load();
+    await this._load({ refresh: true });
   }
 
   async _subscribe() {
     this._teardown();
     if (this._mode !== "storage" && !this._entryId) return;
+    /* Storage mode subscribes with NO entry_id: any scanner's user list is a
+       column of the matrix, so a change on any of them is a change to this view.
+       Scanner mode stays scoped, as before. Job events carry entry_id: null,
+       which the server-side filter lets through either way. */
+    const message = { type: "ekey_ha_app/subscribe" };
+    if (this._mode !== "storage") message.entry_id = this._entryId;
+    const generation = this._generation;
+    let unsub;
     try {
-      /* Storage mode subscribes with NO entry_id: any scanner's user list is a
-         column of the matrix, so a change on any of them is a change to this view.
-         Scanner mode stays scoped, as before. Job events carry entry_id: null,
-         which the server-side filter lets through either way. */
-      const message = { type: "ekey_ha_app/subscribe" };
-      if (this._mode !== "storage") message.entry_id = this._entryId;
-      this._unsub = this._hass.connection.subscribeMessage(
+      /* Awaited, not just assigned. subscribeMessage returns a PROMISE: assigning it
+         put a rejection nobody was holding into the console as an unhandled rejection
+         and left the message below unreachable, so a refused subscription looked like
+         a browser fault instead of the plain warning it is. */
+      unsub = await this._hass.connection.subscribeMessage(
         (msg) => this._onEvent(msg),
         message,
       );
@@ -359,7 +478,16 @@ class EkeyPanel extends HTMLElement {
         "Live updates are unavailable — the list will refresh when you act on it.",
         "warn",
       );
+      return;
     }
+    if (generation !== this._generation) {
+      /* Switched scanner, or left the page, while this was in flight: this subscription
+         belongs to a view that is gone. Dropping the handle would leak it for the life
+         of the connection. */
+      if (typeof unsub === "function") unsub();
+      return;
+    }
+    this._unsub = unsub;
   }
 
   _onEvent(msg) {
@@ -380,9 +508,11 @@ class EkeyPanel extends HTMLElement {
       if (data.done) {
         this._say(data.message, data.ok ? "ok" : "warn");
         this._announce(data.message);
-        /* The database changed, so the matrix has to be re-read. The job dialog
-           stays open on its report — closing it is the operator's move. */
-        this._load();
+        /* The database changed, so the matrix has to be re-read — and re-read from
+           the scanners, because a job that just wrote to them is the moment the
+           matrix most has to be true. The job dialog stays open on its report;
+           closing it is the operator's move. */
+        this._load({ refresh: true });
         return;
       }
       this._announce(data.message);
@@ -413,11 +543,17 @@ class EkeyPanel extends HTMLElement {
 
   /* A two-line dispatcher, so every existing caller — _onEvent, the Refresh
      button, every action — keeps working unchanged and picks up the right source. */
-  async _load() {
-    return this._mode === "storage" ? this._loadStorage() : this._loadScanner();
+  /* `options.refresh` asks the scanners themselves instead of re-reading Home
+     Assistant's snapshot of them. Set when the view is opened, when Refresh is
+     pressed, and after a job — never on the reloads an event triggers, or a burst
+     of events would become a burst of RS-485 round trips. */
+  async _load(options) {
+    return this._mode === "storage"
+      ? this._loadStorage(options)
+      : this._loadScanner(options);
   }
 
-  async _loadScanner() {
+  async _loadScanner(options) {
     if (!this._entryId) {
       this._data = null;
       this._render();
@@ -429,6 +565,7 @@ class EkeyPanel extends HTMLElement {
       this._data = await this._ws({
         type: "ekey_ha_app/users/get",
         entry_id: this._entryId,
+        refresh: !!(options && options.refresh),
       });
       this._enroll = this._data.enroll || null;
     } catch (err) {
@@ -439,14 +576,23 @@ class EkeyPanel extends HTMLElement {
     this._render();
   }
 
-  async _loadStorage() {
+  async _loadStorage(options) {
     this._loading = true;
     this._render();
     try {
-      this._storage = await this._ws({ type: "ekey_ha_app/storage/get" });
-      /* A job that was already running when this page loaded — adopt it rather
-         than leaving a minutes-long operation invisible. */
-      if (this._storage.job && !this._job) this._job = this._storage.job;
+      this._storage = await this._ws({
+        type: "ekey_ha_app/storage/get",
+        refresh: !!(options && options.refresh),
+      });
+      /* A job that is STILL RUNNING is adopted, rather than leaving a minutes-long
+         operation invisible to a page that just loaded. A finished one is not:
+         `storage/get` also returns the last completed job, and taking that opened
+         its report as a modal on every reload — on each press of Refresh, and again
+         on the reload that follows closing it. It is shown as a line in the tools
+         card instead, where it can be read and ignored. */
+      if (this._storage.job && !this._storage.job.done && !this._job) {
+        this._job = this._storage.job;
+      }
     } catch (err) {
       this._storage = null;
       this._say(`Could not read the fingerprint database: ${err.message || err}`, "err");
@@ -725,7 +871,8 @@ class EkeyPanel extends HTMLElement {
         <h2>Users &amp; fingerprints</h2>
         <div class="bar">
           <button id="start-enroll"${busy || !users.length ? " disabled" : ""}>Enroll fingerprint…</button>
-          <button class="ghost" id="reload">Refresh</button>
+          <button class="ghost" id="reload"${this._refreshing ? " disabled" : ""}>${
+            this._refreshing ? "Asking the scanner…" : "Refresh"}</button>
           <button class="ghost" id="sync-to-storage"${
             busy || !this._data.scanner_list_known ? " disabled" : ""}
             title="${this._data.scanner_list_known
@@ -826,17 +973,31 @@ class EkeyPanel extends HTMLElement {
     const changed = s.changed
       ? new Date(s.changed * 1000).toLocaleString()
       : "never";
+    /* The oldest read across the loaded scanners, because the matrix is a
+       comparison and it is only as current as its stalest column. */
+    const stamps = (s.scanners || [])
+      .filter((row) => row.loaded && row.as_of)
+      .map((row) => row.as_of);
+    const checked = stamps.length ? ago(Math.min(...stamps)) : "not yet";
+    /* The outcome of the last job, where it can be read and ignored. It used to be
+       re-opened as a modal on every reload — see _loadStorage. */
+    const last = s.job && s.job.done && s.job.message && !this._job ? s.job : null;
     return `<div class="card">
         <h2>Storage tools</h2>
         <div class="bar">
-          <button id="storage-sync"${busy ? " disabled" : ""}>Sync from a scanner…</button>
+          <button id="storage-enroll"${busy ? " disabled" : ""}>Enroll fingerprint…</button>
+          <button class="ghost" id="storage-sync"${busy ? " disabled" : ""}>Sync from a scanner…</button>
           <button class="ghost" id="storage-backup"${busy ? " disabled" : ""}>Create backup…</button>
           <button class="ghost" id="storage-restore"${busy ? " disabled" : ""}>Restore backup…</button>
-          <button class="ghost" id="reload">Refresh</button>
+          <button class="ghost" id="storage-refresh"${
+            busy || this._refreshing ? " disabled" : ""}>${
+            this._refreshing ? "Asking the scanners…" : "Refresh"}</button>
           <button class="danger" id="storage-clean"${busy || !s.record_count ? " disabled" : ""}>Clean storage…</button>
         </div>
         <p class="hint">${s.record_count} fingerprint(s) for ${s.user_count} user(s),
-          ${humanBytes(s.bytes)}. Last change ${esc(changed)}.</p>
+          ${humanBytes(s.bytes)}. Last change ${esc(changed)}.
+          Scanners checked ${esc(checked)}.</p>
+        ${last ? `<p class="hint">Last job: ${safe(last.message)}</p>` : ""}
       </div>`;
   }
 
@@ -958,6 +1119,9 @@ class EkeyPanel extends HTMLElement {
                 ? `<button class="sm ghost" data-push="${esc(finger.apid)}"${busy ? " disabled" : ""}
                      >Push to ${chips.missing} scanner${chips.missing === 1 ? "" : "s"}…</button>`
                 : ""}
+              <button class="sm ghost danger" data-purge="${esc(finger.apid)}"
+                      data-purge-label="${safe(user.username)} · finger ${esc(finger.finger)}"
+                      ${busy ? " disabled" : ""}>Delete everywhere…</button>
             </div>
           </div>`;
       }).join("");
@@ -1091,6 +1255,8 @@ class EkeyPanel extends HTMLElement {
     if (!dialog) return "";
     switch (dialog.kind) {
       case "syncFrom": return this._renderSyncFrom();
+      case "enroll": return this._renderStorageEnroll();
+      case "purge": return this._renderPurge();
       case "backup": return this._renderBackup();
       case "restore": return this._renderRestore();
       case "clean": return this._renderClean();
@@ -1139,6 +1305,96 @@ class EkeyPanel extends HTMLElement {
           : count === null ? "Copy all fingerprints" : `Copy ${count} fingerprint(s)`}</button>
         <button class="ghost" id="sf-cancel"${busy ? " disabled" : ""}>Cancel</button>
       </div>`, { title: "Copy fingerprints from a scanner into the database" });
+  }
+
+  /* Enrol from the database side: one presentation of a finger, then the template
+     goes to every other scanner with the SAME identity. Doing it per-scanner instead
+     means the same physical finger arrives at each door as a different fingerprint,
+     which is exactly what the database exists to stop. */
+  _renderStorageEnroll() {
+    const dialog = this._dialog;
+    const busy = dialog.busy;
+    const loaded = (this._storage.scanners || []).filter((s) => s.loaded);
+    const others = Math.max(0, loaded.length - 1);
+
+    const scanners = loaded.map((s) => `
+      <option value="${esc(s.entry_id)}"${s.entry_id === dialog.entryId ? " selected" : ""}
+        >${safe(s.title, 80)}</option>`).join("");
+
+    /* Users come from the storage view, which lists whoever the database knows.
+       An enrolment needs a user that exists ON the chosen scanner, so this is
+       deliberately the same picker the scanner page uses, fed from that scanner. */
+    const users = (dialog.users || []).map((u) => `
+      <option value="${esc(u.id)}"${u.id === dialog.userId ? " selected" : ""}
+        >${safe(u.username, 60)}</option>`).join("");
+
+    const fingers = [];
+    for (let n = 1; n <= FINGER_COUNT; n++) {
+      const taken = (dialog.taken || []).indexOf(n) >= 0;
+      fingers.push(`<option value="${n}"${n === dialog.finger ? " selected" : ""}
+        >Finger ${n}${taken ? " — occupied" : ""}</option>`);
+    }
+
+    if (!dialog.users) {
+      return this._renderDialog(`
+        <p class="hint" style="margin-top:0">Reading that scanner's users…</p>
+        <label for="en2-scanner">Enrol on</label>
+        <select id="en2-scanner"${busy ? " disabled" : ""}>${scanners}</select>
+        <div class="bar"><button class="ghost" id="en2-cancel">Cancel</button></div>`,
+        { title: "Enrol a fingerprint" });
+    }
+
+    return this._renderDialog(`
+      <p class="hint" style="margin-top:0">The finger is presented once, on the scanner you
+        choose. The template is then stored in the database and copied to
+        ${others === 0 ? "no other scanner — this is the only one loaded"
+          : `${others} other scanner${others === 1 ? "" : "s"}`}, so the same finger
+        opens every door under one identity.</p>
+      <label for="en2-scanner">Enrol on</label>
+      <select id="en2-scanner"${busy ? " disabled" : ""}>${scanners}</select>
+      <label for="en2-user">User</label>
+      <select id="en2-user"${busy || !users ? " disabled" : ""}>${
+        users || '<option value="">no users on that scanner</option>'}</select>
+      <label for="en2-finger">Finger</label>
+      <select id="en2-finger"${busy ? " disabled" : ""}>${fingers.join("")}</select>
+      ${users ? "" : `<p class="hint warn">That scanner has no users yet. Add one on its own
+        page first — a fingerprint has to belong to somebody.</p>`}
+      <div class="bar">
+        <button id="en2-go"${busy || !users ? " disabled" : ""}>${
+          busy ? "Starting…" : "Enrol"}</button>
+        <button class="ghost" id="en2-cancel"${busy ? " disabled" : ""}>Cancel</button>
+      </div>`, { title: "Enrol a fingerprint" });
+  }
+
+  /* Deleting a fingerprint is the one action that touches every scanner AND the
+     database, so the wording always names both, and the button says how many doors
+     it is about to change. */
+  _renderPurge() {
+    const dialog = this._dialog;
+    const busy = dialog.busy;
+    const holders = (dialog.holders || []);
+    const unknown = (dialog.unknown || []);
+
+    return this._renderDialog(`
+      <p class="hint" style="margin-top:0"><b>${safe(dialog.label)}</b> is removed from every
+        scanner first, each one is re-read to confirm it is really gone, and only then is
+        Home Assistant's copy deleted. If any scanner still has it — or cannot be asked —
+        the database record is kept and the chips will show you which.</p>
+      ${holders.length
+        ? `<p class="hint">On ${holders.length} scanner(s): ${safe(holders.join(", "), 200)}.</p>`
+        : '<p class="hint">No scanner currently lists this fingerprint.</p>'}
+      ${unknown.length
+        ? `<p class="hint warn">${unknown.length} scanner(s) could not be asked what they hold
+           (${safe(unknown.join(", "), 200)}). The delete cannot be confirmed there, so the
+           database record will be kept.</p>`
+        : ""}
+      <p class="hint">This cannot be undone from here: a template that is deleted everywhere
+        can only come back from a backup, or by enrolling the finger again.</p>
+      <div class="bar">
+        <button class="danger" id="pg-go"${busy ? " disabled" : ""}>${busy ? "Starting…"
+          : `Delete from ${holders.length} scanner(s) and the database`}</button>
+        <button class="ghost" id="pg-cancel"${busy ? " disabled" : ""}>Cancel</button>
+      </div>`, { title: "Delete this fingerprint everywhere" });
   }
 
   _renderSyncTo() {
@@ -1509,30 +1765,10 @@ class EkeyPanel extends HTMLElement {
       if (node) node.addEventListener(event, handler);
     };
 
-    on("scanner", "change", async (ev) => {
-      const value = ev.target.value;
-      this._mode = value === STORAGE_ID ? "storage" : "scanner";
-      /* Only a real scanner is ever stored: the sentinel must not reach the
-         backend — see STORAGE_ID. Keeping the last scanner selected also means
-         switching back needs no extra round trip. */
-      if (this._mode === "scanner") this._entryId = value;
-      this._editing = null;
-      this._enrollOpen = false;
-      this._enroll = null;
-      this._dialog = null;
-      this._message = null;
-      this._formCache = {};
-      await this._subscribe();
-      await this._load();
-    });
+    on("scanner", "change", (ev) => this._selectMode(ev.target.value));
 
     // ---- storage view -------------------------------------------------------
-    on("goto-storage", "click", async () => {
-      this._mode = "storage";
-      this._message = null;
-      await this._subscribe();
-      await this._load();
-    });
+    on("goto-storage", "click", () => this._selectMode(STORAGE_ID));
     on("sync-to-storage", "click", () => this._openSyncTo());
     on("storage-sync", "click", () => this._openSyncFrom());
     on("storage-backup", "click", () => this._openDialog({ kind: "backup", encrypt: true }));
@@ -1552,6 +1788,18 @@ class EkeyPanel extends HTMLElement {
     });
     on("sf-go", "click", () => this._startSyncFrom());
     on("sf-cancel", "click", () => this._closeDialog());
+
+    on("storage-enroll", "click", () => this._openStorageEnroll());
+    on("en2-scanner", "change", (ev) => this._storageEnrollScanner(ev.target.value));
+    on("en2-user", "change", (ev) => { this._dialog.userId = ev.target.value; this._render(); });
+    on("en2-finger", "change", (ev) => {
+      this._dialog.finger = Number(ev.target.value);
+      this._render();
+    });
+    on("en2-go", "click", () => this._startStorageEnroll());
+    on("en2-cancel", "click", () => this._closeDialog());
+    on("pg-go", "click", () => this._startPurge());
+    on("pg-cancel", "click", () => this._closeDialog());
 
     on("st-go", "click", () => this._startSyncTo());
     on("st-cancel", "click", () => this._closeDialog());
@@ -1593,7 +1841,8 @@ class EkeyPanel extends HTMLElement {
       if (ev.target === ev.currentTarget) this._closeDialog();
     });
 
-    on("reload", "click", () => { this._message = null; this._load(); });
+    on("reload", "click", () => this._refresh());
+    on("storage-refresh", "click", () => this._refresh());
     on("add-user", "click", () => this._addUser());
     on("start-enroll", "click", () => {
       this._enrollOpen = true;
@@ -1629,6 +1878,9 @@ class EkeyPanel extends HTMLElement {
       el.addEventListener("click", () => this._cancelEnroll(el.getAttribute("data-cancel-enroll"))));
     root.querySelectorAll("[data-push]").forEach((el) =>
       el.addEventListener("click", () => this._startPush({ apids: [el.getAttribute("data-push")] })));
+    root.querySelectorAll("[data-purge]").forEach((el) =>
+      el.addEventListener("click", () => this._openPurge(
+        el.getAttribute("data-purge"), el.getAttribute("data-purge-label"))));
     root.querySelectorAll("[data-adopt]").forEach((el) =>
       el.addEventListener("click", () => this._adopt(
         el.getAttribute("data-adopt"), el.getAttribute("data-adopt-entry"))));
@@ -1668,6 +1920,108 @@ class EkeyPanel extends HTMLElement {
     const result = await this._call({
       type: "ekey_ha_app/storage/sync_from_scanner",
       entry_id: dialog.entryId,
+    });
+    if (result) {
+      this._dialog = null;
+      this._job = result;
+    } else {
+      dialog.busy = false;
+    }
+    this._render();
+  }
+
+  /* Enrolling from the database side. The user list has to come from the scanner
+     that will do the enrolling — the database knows people, but a fingerprint is
+     assigned to a user id that only exists on that backend. */
+  async _openStorageEnroll() {
+    const loaded = (this._storage.scanners || []).filter((s) => s.loaded);
+    if (!loaded.length) {
+      this._say("No scanner is loaded, so there is nothing to enrol on.", "warn");
+      return;
+    }
+    this._openDialog({ kind: "enroll", entryId: loaded[0].entry_id, finger: 1 });
+    await this._storageEnrollScanner(loaded[0].entry_id);
+  }
+
+  async _storageEnrollScanner(entryId) {
+    const dialog = this._dialog;
+    if (!dialog) return;
+    dialog.entryId = entryId;
+    dialog.users = null;              // re-read: a different scanner, different users
+    dialog.userId = null;
+    dialog.taken = [];
+    this._render();
+
+    const data = await this._call({ type: "ekey_ha_app/users/get", entry_id: entryId });
+    /* The dialog may have been closed, or another scanner picked, while this was in
+       flight — the answer then belongs to a dialog that is gone. */
+    if (!this._dialog || this._dialog !== dialog || dialog.entryId !== entryId) return;
+    const users = (data && data.users) || [];
+    dialog.users = users;
+    dialog.userId = users.length ? users[0].id : null;
+    dialog.taken = this._takenFingers(users, dialog.userId);
+    this._render();
+  }
+
+  _takenFingers(users, userId) {
+    const user = (users || []).find((u) => u.id === userId);
+    return ((user && user.fingers) || []).map((f) => f.finger);
+  }
+
+  async _startStorageEnroll() {
+    const dialog = this._dialog;
+    if (!dialog.entryId || !dialog.userId) return;
+    dialog.busy = true;
+    this._render();
+    const result = await this._call({
+      type: "ekey_ha_app/storage/enroll",
+      entry_id: dialog.entryId,
+      user_id: dialog.userId,
+      finger: dialog.finger || 1,
+    });
+    if (result) {
+      this._dialog = null;
+      this._job = result;
+    } else {
+      dialog.busy = false;
+    }
+    this._render();
+  }
+
+  /* Deleting everywhere. The holders are read off the same chips the row is already
+     showing, so the confirmation names the doors the operator can see. */
+  _openPurge(apid, label) {
+    const record = this._recordFor(apid);
+    const holders = [];
+    const unknown = [];
+    for (const scanner of (this._storage.scanners || [])) {
+      const state = record ? this._cellState(record, scanner) : "unknown";
+      if (state === "ok") holders.push(scanner.title);
+      else if (state === "unknown") unknown.push(scanner.title);
+    }
+    this._openDialog({ kind: "purge", apid, label: label || apid, holders, unknown });
+  }
+
+  _recordFor(apid) {
+    for (const user of (this._storage.users || [])) {
+      for (const finger of (user.fingers || [])) {
+        if (finger.apid === apid) return finger;
+      }
+    }
+    return null;
+  }
+
+  async _startPurge() {
+    const dialog = this._dialog;
+    dialog.busy = true;
+    this._render();
+    const result = await this._call({
+      type: "ekey_ha_app/storage/purge_fingerprint",
+      apid: dialog.apid,
+      /* Echoed back deliberately: the server re-checks that the confirmation names
+         the fingerprint being deleted, so a mis-wired button cannot delete a
+         different one. */
+      confirm: dialog.apid,
     });
     if (result) {
       this._dialog = null;

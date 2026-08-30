@@ -191,6 +191,10 @@ fingerprint *template*, and it exists because a template cannot be re-derived fr
 anything. Replace a sensor or factory-reset one, and without a copy every person on it
 has to come back and present a finger again.
 
+The picker remembers what you last chose, per browser, so the page reopens where you
+left it instead of always on the first scanner. A remembered scanner that has since
+been removed is ignored.
+
 What makes a central copy possible is that **the APID lives inside the template blob,
 in plaintext** — so a template written to a second scanner keeps its identity. One
 physical finger has one APID across the whole fleet.
@@ -213,6 +217,11 @@ glance:
 | `?` | that scanner's list could not be read. **Not** the same as missing; nothing is assumed |
 | `n/a` | it can never be copied there — a different device variant, or a backend with no template routes |
 
+The chips are only as current as the last read, so the page says how old that is and
+**Refresh** goes and asks the scanners again rather than re-reading Home Assistant's
+copy. Opening the view and finishing a job re-read them too — a push decides what to
+write from exactly this comparison, so it always asks first.
+
 Past four scanners the healthy chips collapse into one (`ok on 7`) so that deviations
 stand out; the collapsed names stay in the tooltip.
 
@@ -220,6 +229,8 @@ stand out; the collapsed names stay in the tooltip.
 
 | Action | Effect |
 | --- | --- |
+| **Enroll fingerprint…** | the finger is presented **once**, on the scanner you pick; the template is then stored and copied to every other scanner, so one finger has one identity fleet-wide |
+| **Delete everywhere…** (on a finger row) | deletes from every scanner, re-reads each one to confirm, unassigns it there — and drops the database record **last**, only if all confirmed |
 | **Sync from a scanner…** | reads that scanner's templates into the database. Writes nothing to it, and nobody presents a finger |
 | **Sync to storage…** (on a scanner's card) | the same thing, previewed first, from the scanner you are looking at |
 | **Adopt into database** | pulls in one fingerprint the database was missing, keeping its APID |
@@ -229,7 +240,11 @@ stand out; the collapsed names stay in the tooltip.
 | **Clean storage…** | deletes every record. Typed confirmation; the scanners are untouched |
 
 **Nothing is ever pushed automatically.** Drift is detected continuously and displayed,
-but a write to a door controller only ever happens when you click. Transfers are slow —
+but a write to a door controller only ever happens when you click. Enrolling from the
+storage view is that click: it says "enrol this finger and copy it everywhere", and the
+fan-out is the operation you asked for. Enrolling from a scanner's own page copies the
+template into the database — a backup costs nobody any access — but writes to no other
+scanner; those doors simply show `missing`, with **Push** offered. Transfers are slow —
 a few seconds per fingerprint, because the sensor spends ~1.9 s registering each one —
 so bulk actions run as a background job with live per-item progress and a **Stop** that
 takes effect between fingerprints, never inside one.

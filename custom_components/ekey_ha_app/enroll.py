@@ -449,6 +449,40 @@ class EnrollManager:
             )
             return
 
+        # The database's copy is taken HERE — after the assignment is written, before
+        # the terminal event goes out. Every enrollment lands in the database, not
+        # just the ones started from the storage view: the copy is what makes a
+        # scanner replaceable, and asking someone to remember to press a second
+        # button afterwards is how a fleet ends up with fingerprints that exist in
+        # exactly one place.
+        #
+        # Read-only as far as the other scanners are concerned. Copying it OUT to
+        # them is a separate, explicit act (the storage view's Enroll, or Push) —
+        # writing a fingerprint to a door is never a side effect.
+        #
+        # Deferred import: jobs.py imports this module for its progress event, and a
+        # module-level import here would close that loop.
+        from .jobs import async_capture_enrolled
+
+        try:
+            await async_capture_enrolled(
+                self.hass,
+                self.entry_id,
+                apid=session.apid,
+                username=session.username,
+                finger=session.finger,
+                ha_person=(user or {}).get("ha_person"),
+            )
+        except Exception:  # noqa: BLE001 — a missing copy is not a failed enrollment
+            # Deliberately not surfaced to the operator as an error: the fingerprint
+            # is on the scanner and assigned, and it appears in the storage view as
+            # "extra" — one click from being adopted.
+            _LOGGER.warning(
+                "Enrolled %s finger %s, but the fingerprint database could not take "
+                "a copy of the template; it will show as extra in the storage view",
+                session.username, session.finger, exc_info=True,
+            )
+
         note = ""
         if evicted:
             note = (

@@ -86,12 +86,44 @@ a template cannot be re-derived: replace a sensor and, without a copy, everyone 
 re-enrols. The copy is portable because the APID travels inside the template's own
 plaintext header, so a template written to another scanner keeps its identity.
 
+The picker's choice is remembered in `localStorage` under `ekey-panel.selection`, so
+the page reopens on the same scanner or on the database. It is checked against the live
+scanner list on load — a remembered entry that no longer exists is dropped rather than
+shown — and `__storage__` is a panel-side sentinel that never reaches the backend, in
+storage or anywhere else.
+
 Each finger row shows one chip per scanner — `ok` / `missing` / `extra` / `?` (list
 unreadable, **not** the same as missing) / `n/a` (a different device variant, so it can
 never be copied there). **Sync from a scanner** fills the database, **Push** writes
 missing templates out (and names the owner in that scanner's own user list, so it keeps
 working when Home Assistant is down), **Create backup** / **Restore backup** move the set
 to and from a file, **Clean storage** empties it.
+
+**Enroll fingerprint** here is the one that pays for the whole feature: the finger is
+presented *once*, on the scanner you pick, and the template is then stored and copied to
+every other scanner — so one physical finger has one APID fleet-wide. Enrolling on each
+scanner separately gives the same finger a different identity at every door, which is
+what makes "is this person on all my doors?" unanswerable. Every enrollment, wherever it
+is started, lands in the database (`enroll.py` takes the copy as part of finishing, before
+the panel is even told); only the storage-view enrollment fans it out.
+
+**Delete everywhere** on a finger row is the reverse, and its order is deliberate: each
+scanner is deleted from, then **re-read to confirm** the fingerprint is really gone, then
+unassigned from that scanner's user list — and only when every scanner has confirmed is
+the database record dropped. A scanner that still lists it, or that could not be asked,
+keeps the record: a fingerprint that still opens a door must never lose the record that
+names who it belongs to. Running it again is safe.
+
+**Refresh asks the scanners.** The app coordinator polls every five minutes, which is
+right for entities and wrong for a page whose whole content is a comparison between
+sensors — a fingerprint deleted from a door inside that window still looks present, and
+a push reading the same cache skips that door believing it already has it. So opening
+the view, pressing Refresh, and finishing a job each re-read every scanner
+(`storage/get` with `refresh: true`); the reloads an event triggers do not, or a burst
+of events would become a burst of RS-485 round trips. The tools card says how old the
+comparison is, taken from the stalest column. A scanner whose refresh *failed* keeps its
+previous snapshot internally but is reported as `?` — stale is unknown, and unknown is
+never missing.
 
 Two properties worth knowing:
 

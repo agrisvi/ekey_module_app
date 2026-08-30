@@ -38,6 +38,17 @@ globalThis.document = {
   addEventListener() {},
   removeEventListener() {},
 };
+/* The panel remembers the picker's choice here. Swapped per test — including for a
+   store that throws on every access, which is what a private window really does. */
+function fakeStorage(initial) {
+  let value = initial === undefined ? null : initial;
+  return {
+    getItem: () => value,
+    setItem: (key, next) => { value = next; },
+    get written() { return value; },
+  };
+}
+globalThis.window = { localStorage: fakeStorage() };
 
 /* Default to the component's own copy, resolved from this file so the test runs from
  * any working directory. An explicit argument still wins, for checking a copy. */
@@ -635,6 +646,463 @@ console.log("base64 helpers:");
   check("clip tolerates null", clip(null) === "");
   check("humanBytes reads in kB", humanBytes(14582) === "14.2 kB");
   check("humanBytes reads in MB", humanBytes(1500000) === "1.4 MB");
+}
+
+console.log("the picker remembers its choice:");
+{
+  /* Without this the page always reopens on the first scanner, so anyone working in
+     the database has to re-pick "Fingerprint storage" after every reload. */
+  const scanners = [
+    { entry_id: "e1", title: "Front door", loaded: true },
+    { entry_id: "e2", title: "Back door", loaded: true },
+  ];
+
+  {
+    const p = panel({ _scanners: scanners, _entryId: "e1", _mode: "storage" });
+    window.localStorage = fakeStorage();
+    p._rememberSelection();
+    const written = JSON.parse(window.localStorage.written);
+    check("writes the mode", written.mode === "storage");
+    check("writes the scanner alongside it", written.entry_id === "e1");
+  }
+
+  {
+    const p = panel({ _scanners: scanners, _entryId: "e1" });
+    p._applySelection({ mode: "storage", entry_id: "e2" });
+    check("reopens in storage mode", p._mode === "storage");
+    check("reopens on the remembered scanner", p._entryId === "e2");
+  }
+
+  {
+    /* The remembered scanner was deleted from Home Assistant in the meantime. */
+    const p = panel({ _scanners: scanners, _entryId: "e1" });
+    p._applySelection({ mode: "scanner", entry_id: "gone" });
+    check("ignores a scanner that no longer exists", p._entryId === "e1");
+    check("stays in scanner mode", p._mode === "scanner");
+  }
+
+  {
+    /* The sentinel must never come back as an entry id — see STORAGE_ID. */
+    const p = panel({ _scanners: scanners, _entryId: "e1" });
+    p._applySelection({ mode: "storage", entry_id: "__storage__" });
+    check("never restores the sentinel as a scanner", p._entryId === "e1");
+  }
+
+  {
+    const p = panel({ _scanners: scanners, _entryId: "e1" });
+    window.localStorage = fakeStorage("not json at all");
+    check("a corrupt value recalls as nothing", p._recallSelection() === null);
+    window.localStorage = fakeStorage(JSON.stringify("a string, not an object"));
+    check("a non-object value recalls as nothing", p._recallSelection() === null);
+    window.localStorage = fakeStorage();
+    check("an empty store recalls as nothing", p._recallSelection() === null);
+  }
+
+  {
+    /* A private window throws on every access rather than returning null. */
+    const p = panel({ _scanners: scanners, _entryId: "e1", _mode: "storage" });
+    window.localStorage = {
+      getItem() { throw new Error("The operation is insecure."); },
+      setItem() { throw new Error("The operation is insecure."); },
+    };
+    let threw = false;
+    try {
+      check("a throwing store recalls as nothing", p._recallSelection() === null);
+      p._rememberSelection();
+    } catch (err) {
+      threw = true;
+    }
+    check("a throwing store does not break the panel", !threw);
+    window.localStorage = fakeStorage();
+  }
+
+  {
+    check("applying nothing changes nothing", (() => {
+      const p = panel({ _scanners: scanners, _entryId: "e1" });
+      p._applySelection(null);
+      return p._entryId === "e1" && p._mode === "scanner";
+    })());
+  }
+
+  {
+    /* The trap remembering the mode would otherwise create: with no scanners the head
+       renders the storage title but the body renders the no-scanners card, and the
+       picker is not drawn at all — so there is no way out, and the next load restores
+       it again. */
+    const p = panel({ _scanners: [], _entryId: null });
+    p._applySelection({ mode: "storage", entry_id: null });
+    check("storage mode is not restored with no scanners", p._mode === "scanner");
+
+    const stuck = panel({ _scanners: [], _entryId: null, _mode: "storage" });
+    const head = stuck._renderHead();
+    check("that state really has no picker to leave by", !head.includes('id="scanner"'));
+  }
+}
+
+console.log("switching view:");
+{
+  /* Both ways in go through _selectMode, because when they did not, the button cleared
+     less than the dropdown and left the other view's dialog and edits on screen. */
+  const scanners = [
+    { entry_id: "e1", title: "Front door", loaded: true },
+    { entry_id: "e2", title: "Back door", loaded: true },
+  ];
+
+  function switcher(state) {
+    const p = panel({ _scanners: scanners, _entryId: "e1", ...state });
+    p._hass = {
+      connection: { subscribeMessage: async () => () => {} },
+      callWS: async () => ({ users: [], unassigned: [], missing: [], scanner_list_known: true }),
+    };
+    window.localStorage = fakeStorage();
+    return p;
+  }
+
+  {
+    const p = switcher({ _editing: "u1", _enrollOpen: true, _dialog: { kind: "backup" }, _formCache: { x: 1 } });
+    await p._selectMode("__storage__");
+    check("the button switches to storage", p._mode === "storage");
+    check("it clears a half-finished edit", p._editing === null);
+    check("it closes the enrolment picker", p._enrollOpen === false);
+    check("it closes any open dialog", p._dialog === null);
+    check("it drops the cached form fields", Object.keys(p._formCache).length === 0);
+    check("it never stores the sentinel as a scanner", p._entryId === "e1");
+    check("it remembers the choice", JSON.parse(window.localStorage.written).mode === "storage");
+  }
+
+  {
+    /* Switching scanner used to leave the previous scanner's users on screen for the
+       whole round trip, under the new scanner's title. */
+    const p = switcher({ _data: { users: [{ id: "old", username: "Someone else", fingers: [] }] } });
+    const pending = p._selectMode("e2");
+    check("the previous scanner's users are dropped immediately", p._data === null);
+    await pending;
+    check("the new scanner is selected", p._entryId === "e2");
+    check("the mode is back to scanner", p._mode === "scanner");
+  }
+
+  {
+    const p = switcher({ _mode: "storage", _storage: { records: [], scanners: [], users: [] } });
+    const pending = p._selectMode("e1");
+    check("the previous database snapshot is dropped immediately", p._storage === null);
+    await pending;
+  }
+}
+
+console.log("refresh asks the scanners:");
+{
+  /* The button used to re-read Home Assistant's own snapshot, which its five-minute
+     poll fills — so it re-rendered an identical page and looked dead, while the
+     matrix kept showing a fingerprint on a door it had been deleted from. */
+  function spy(state) {
+    const p = panel({ _scanners: [{ entry_id: "e1", title: "Front door", loaded: true }],
+                      _entryId: "e1", ...state });
+    p.sent = [];
+    p._hass = {
+      connection: { subscribeMessage: async () => () => {} },
+      callWS: async (message) => {
+        p.sent.push(message);
+        return message.type === "ekey_ha_app/storage/get"
+          ? { records: [], users: [], scanners: [], extras: [], record_count: 0,
+              user_count: 0, bytes: 0, job: null }
+          : { users: [], unassigned: [], missing: [], scanner_list_known: true };
+      },
+    };
+    window.localStorage = fakeStorage();
+    return p;
+  }
+
+  {
+    const p = spy({ _mode: "storage" });
+    await p._refresh();
+    check("the storage read asks the scanners", p.sent[0].refresh === true);
+  }
+
+  {
+    const p = spy({});
+    await p._refresh();
+    check("the scanner read asks that scanner", p.sent[0].refresh === true);
+    check("it is still scoped to the entry", p.sent[0].entry_id === "e1");
+  }
+
+  {
+    const p = spy({ _mode: "storage" });
+    await p._loadStorage();
+    check("an ordinary load does not poll every scanner", p.sent[0].refresh === false);
+  }
+
+  {
+    /* An event burst must not become a burst of RS-485 round trips. */
+    const p = spy({ _mode: "storage" });
+    p._onEvent({ event_type: "ekey_storage_changed", data: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+    check("an event-driven reload does not poll", p.sent.every((m) => !m.refresh));
+  }
+
+  {
+    /* A job just wrote to the doors — that is exactly when the matrix has to be true. */
+    const p = spy({ _mode: "storage" });
+    p._onEvent({ event_type: "ekey_storage_job", data: { done: true, ok: true, message: "done" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    check("the reload after a job does poll", p.sent.some((m) => m.refresh === true));
+  }
+
+  {
+    const p = spy({ _mode: "storage" });
+    let inFlight = null;
+    p._hass.callWS = () => new Promise((resolve) => { inFlight = resolve; });
+    p._storage = { records: [], users: [], scanners: [], extras: [],
+                   record_count: 0, user_count: 0, bytes: 0, job: null };
+    const pending = p._refresh();
+    check("the button says what it is doing",
+      p._renderStorageTools().includes("Asking the scanners…"));
+    check("and cannot be pressed twice",
+      /id="storage-refresh" disabled/.test(p._renderStorageTools()));
+    inFlight({ records: [], users: [], scanners: [], extras: [], record_count: 0,
+               user_count: 0, bytes: 0, job: null });
+    await pending;
+    check("and goes back to Refresh", p._renderStorageTools().includes(">Refresh<"));
+  }
+
+  {
+    const p = spy({ _mode: "storage" });
+    p._storage = {
+      records: [], users: [], extras: [], record_count: 0, user_count: 0, bytes: 0,
+      scanners: [
+        { entry_id: "e1", title: "Front", loaded: true, as_of: Date.now() / 1000 - 3 },
+        { entry_id: "e2", title: "Back", loaded: true, as_of: Date.now() / 1000 - 600 },
+      ],
+    };
+    const html = p._renderStorageTools();
+    check("the age shown is the stalest column", html.includes("10 minutes ago"));
+
+    p._storage.scanners = [{ entry_id: "e1", title: "Front", loaded: true, as_of: null }];
+    check("an unread scanner says so",
+      p._renderStorageTools().includes("Scanners checked not yet"));
+  }
+}
+
+console.log("enrolling from the database:");
+{
+  /* One presentation of a finger, one identity on every door. The dialog has to say
+     that, and it cannot offer Enrol without a user to attach the finger to. */
+  {
+    const p = storagePanel({ _dialog: { kind: "enroll", entryId: "e1", finger: 1,
+      users: [{ id: "u1", username: "Jane", fingers: [{ finger: 2, apid: "x" }] }],
+      userId: "u1", taken: [2] } });
+    const html = p._renderStorageModal();
+    check("it is a dialog", html.includes('role="dialog"') && html.includes("modal-box"));
+    check("it picks the scanner to enrol on", html.includes('id="en2-scanner"'));
+    check("only loaded scanners are offered",
+      html.includes("Front door") && html.includes("Back door") && !html.includes("Garage"));
+    check("it picks the user", html.includes('id="en2-user"') && html.includes("Jane"));
+    check("it picks the finger", html.includes('id="en2-finger"'));
+    check("an occupied slot is marked", html.includes("Finger 2 — occupied"));
+    check("it says how far the copy goes", html.includes("1 other scanner"));
+    check("Enroll and Cancel", html.includes('id="en2-go"') && html.includes('id="en2-cancel"'));
+  }
+
+  {
+    const p = storagePanel({ _dialog: { kind: "enroll", entryId: "e1", finger: 1,
+      users: [], userId: null, taken: [] } });
+    const html = p._renderStorageModal();
+    check("no users means no Enroll", /id="en2-go"[^>]*disabled/.test(html));
+    check("and it says why", html.includes("has to belong to somebody"));
+  }
+
+  {
+    const p = storagePanel({ _dialog: { kind: "enroll", entryId: "e1", finger: 1 } });
+    check("the user list is not invented while it loads",
+      p._renderStorageModal().includes("Reading that scanner's users…"));
+  }
+
+  {
+    const p = storagePanel({ _dialog: { kind: "enroll", entryId: "e1", finger: 1,
+      users: [{ id: "u1", username: "Jane", fingers: [] }], userId: "u1", busy: true } });
+    const html = p._renderStorageModal();
+    check("a start in flight cannot be pressed twice", /id="en2-go"[^>]*disabled/.test(html));
+    check("and says so", html.includes("Starting…"));
+  }
+
+  check("the storage view offers it", storagePanel({})._renderStorageTools()
+    .includes('id="storage-enroll"'));
+}
+
+console.log("deleting everywhere:");
+{
+  /* The wording names BOTH sides every time — this is the action that changes doors
+     and the database, and "Delete" alone would not say which. */
+  {
+    const p = storagePanel({});
+    p._openPurge("a".repeat(36), "Jane · finger 2");
+    check("it reads the holders off the chips", p._dialog.holders.join() === "Front door");
+    check("and the scanners it could not ask", p._dialog.unknown.join() === "Garage");
+
+    const html = p._renderStorageModal();
+    check("the button counts the doors", html.includes("Delete from 1 scanner(s) and the database"));
+    check("it names the fingerprint", html.includes("Jane · finger 2"));
+    check("it explains the order", html.includes("re-read to confirm"));
+    check("it warns about the unreadable scanner", html.includes("could not be asked"));
+    check("it says the record is kept in that case", html.includes("record will be kept"));
+    check("Cancel is offered", html.includes('id="pg-cancel"'));
+  }
+
+  {
+    /* A fingerprint no scanner holds: still deletable, and the button must not
+       claim otherwise. */
+    const p = storagePanel({});
+    p._storage.scanners = [{ entry_id: "e1", title: "Front door", loaded: true,
+      list_known: true, on_scanner: [], on_scanner_count: 0, dev_variant: 10 }];
+    p._openPurge("a".repeat(36), "Jane · finger 2");
+    const html = p._renderStorageModal();
+    check("no holders is stated plainly", html.includes("No scanner currently lists"));
+    check("and the count is honest", html.includes("Delete from 0 scanner(s)"));
+  }
+
+  {
+    const p = storagePanel({});
+    const html = p._renderStorageUsers();
+    check("every finger row offers it", (html.match(/data-purge=/g) || []).length === 2);
+    check("the row action is marked dangerous", html.includes('class="sm ghost danger"'));
+  }
+
+  {
+    /* A hostile username reaching the confirmation through the row's data attribute. */
+    const p = storagePanel({});
+    p._openPurge("a".repeat(36), '<img src=x onerror=alert(1)>');
+    const html = p._renderStorageModal();
+    check("the label is escaped", !html.includes("<img") && html.includes("&lt;img"));
+  }
+}
+
+console.log("a finished job does not come back:");
+{
+  /* storage/get returns the last COMPLETED job as well as a running one. Adopting
+     it re-opened its report as a modal on every reload — on each press of Refresh,
+     and again on the reload that follows closing it. */
+  const done = { job_id: "j1", done: true, ok: true, message: "All 1 written and verified.",
+                 counts: { ok: 1, skipped: 0, failed: 0 }, total: 1, items: [] };
+  const live = { job_id: "j2", done: false, message: "Writing 1 of 3", total: 3,
+                 index: 1, counts: { ok: 0, skipped: 0, failed: 0 } };
+  const empty = { records: [], users: [], scanners: [], extras: [],
+                  record_count: 0, user_count: 0, bytes: 0 };
+
+  function loader(job) {
+    const p = panel({ _mode: "storage",
+                      _scanners: [{ entry_id: "e1", title: "Front door", loaded: true }],
+                      _entryId: "e1" });
+    p._hass = { callWS: async () => ({ ...empty, job }),
+                connection: { subscribeMessage: async () => () => {} } };
+    return p;
+  }
+
+  {
+    const p = loader(done);
+    await p._loadStorage({ refresh: true });
+    check("a finished job is not adopted", p._job === null);
+    check("so Refresh opens no dialog", p._renderStorageModal() === "");
+    check("it is reported as a line instead",
+      p._renderStorageTools().includes("Last job: All 1 written and verified."));
+  }
+
+  {
+    const p = loader(live);
+    await p._loadStorage();
+    check("a running job IS adopted", p._job !== null && p._job.job_id === "j2");
+    check("and its dialog opens", p._renderStorageModal().includes("modal-box"));
+    check("a running job is not also a Last job line",
+      !p._renderStorageTools().includes("Last job:"));
+  }
+
+  {
+    /* Close, then the reload that closing can trigger, must not bounce it back. */
+    const p = loader(done);
+    p._job = done;
+    p._stale = true;
+    p._closeDialog();
+    check("closing clears it", p._job === null);
+    await p._loadStorage();
+    check("and the reload leaves it closed", p._job === null);
+  }
+
+  {
+    /* A hostile or truncated message is still just text in a card. */
+    const p = loader({ ...done, message: '<img src=x onerror=alert(1)>' });
+    await p._loadStorage();
+    const html = p._renderStorageTools();
+    check("the last-job line is escaped", !html.includes("<img") && html.includes("&lt;img"));
+  }
+}
+
+console.log("live subscription:");
+{
+  /* subscribeMessage returns a promise. Assigning it instead of awaiting it made the
+     catch below unreachable and turned every refused subscription into an unhandled
+     rejection in the browser console — a browser-level error for a condition the panel
+     has a plain warning for. These pin the handling, not the happy path. */
+  function fakeHass(subscribe) {
+    return { connection: { subscribeMessage: subscribe }, callWS: async () => ({}) };
+  }
+
+  {
+    const p = panel({ _entryId: "e1" });
+    let unsubbed = false;
+    p._hass = fakeHass(async () => () => { unsubbed = true; });
+    await p._subscribe();
+    check("keeps the unsubscribe handle, resolved", typeof p._unsub === "function");
+    p._teardown();
+    await Promise.resolve();
+    check("teardown calls it", unsubbed);
+    check("teardown forgets it", p._unsub === null);
+  }
+
+  {
+    const p = panel({ _entryId: "e1" });
+    p._hass = fakeHass(async () => { throw new Error("nope"); });
+    let threw = false;
+    try {
+      await p._subscribe();
+    } catch (err) {
+      threw = true;
+    }
+    check("a refused subscription does not reject", !threw);
+    check("a refused subscription warns instead",
+      p._message && p._message.kind === "warn"
+      && p._message.text.includes("Live updates are unavailable"));
+    check("a refused subscription leaves no handle", !p._unsub);
+  }
+
+  {
+    /* Switching scanner while the subscribe is in flight: the late handle belongs to a
+       view that is gone, and keeping it would leave the old scanner's events arriving
+       for the life of the connection. */
+    const p = panel({ _entryId: "e1" });
+    let released = false;
+    let release;
+    p._hass = fakeHass(() => new Promise((resolve) => { release = resolve; }));
+    const pending = p._subscribe();
+    p._teardown();                       // the scanner changed under it
+    release(() => { released = true; });
+    await pending;
+    check("a subscription that lands after a teardown is released", released);
+    check("a subscription that lands after a teardown is not kept", !p._unsub);
+  }
+
+  {
+    const p = panel({ _mode: "storage", _entryId: "e1" });
+    let sent = null;
+    p._hass = fakeHass(async (cb, message) => { sent = message; return () => {}; });
+    await p._subscribe();
+    check("storage mode subscribes unscoped", sent && sent.entry_id === undefined);
+
+    const q = panel({ _entryId: "e1" });
+    let scoped = null;
+    q._hass = fakeHass(async (cb, message) => { scoped = message; return () => {}; });
+    await q._subscribe();
+    check("scanner mode stays scoped", scoped && scoped.entry_id === "e1");
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

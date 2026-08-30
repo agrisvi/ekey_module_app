@@ -20,6 +20,7 @@ able to see and fix — so they are computed here once rather than in each consu
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -79,6 +80,7 @@ class EkeyAppCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "missing": [],
                 "capabilities": caps.as_dict(),
                 "app_api": False,
+                "read_at": time.time(),
             }
 
         try:
@@ -127,6 +129,11 @@ class EkeyAppCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "missing": missing,
             "capabilities": (caps.as_dict() if caps else None),
             "app_api": bool(caps and caps.has_app_api),
+            # When these two lists were actually read off the scanner. The poll is
+            # five minutes apart, so a consumer that compares scanners against each
+            # other — the storage matrix, and the push that decides what to write
+            # from it — has to be able to say how old its picture is.
+            "read_at": time.time(),
         }
 
     async def async_refresh_now(self) -> None:
