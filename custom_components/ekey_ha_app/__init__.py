@@ -299,7 +299,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         identifiers={(DOMAIN, f"{host}:{port}")},
         name=f"ekey Scanner ({host}:{port})",
         manufacturer="ekey",
-        model=f"dLine {device_info.get('dev_typ', 'Unknown')}",
+        model="dLine module",
         sw_version=device_info.get("sw_version", "Unknown"),
         hw_version=str(device_info.get("hw_version", "Unknown")),
         serial_number=device_info.get("prod_sn", None),

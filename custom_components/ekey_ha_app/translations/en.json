@@ -51,9 +51,17 @@
       "init": {
         "title": "ekey device options",
         "menu_options": {
+          "token": "API token",
           "serial": "Scanner connection (serial port)",
           "wifi_push": "Push Wi-Fi credentials to the device",
           "wifi_reset": "Reset the device's Wi-Fi (return to setup mode)"
+        }
+      },
+      "token": {
+        "title": "API token",
+        "description": "The token this integration sends to the backend at {host}.\n\nThe backend prints it once when it is first minted, and the System tab can generate a new one at any time — which stops the old one working immediately. Paste the current token here after doing that.\n\nUsers, fingerprints, actions and automations all need it. A local daemon still reports the scanner without one, so leaving this empty is allowed there; an ekey device requires it.",
+        "data": {
+          "token": "API token"
         }
       },
       "serial": {
@@ -94,10 +102,14 @@
       "invalid_auth": "Authentication failed — check the API token.",
       "config_failed": "The device rejected the request.",
       "serial_failed": "The backend rejected that port. Check the log for the reason it gave.",
-      "serial_elsewhere": "This installation keeps the serial port outside Home Assistant — in the add-on configuration, or the daemon's -d option. Change it there."
+      "serial_elsewhere": "This installation keeps the serial port outside Home Assistant — in the add-on configuration, or the daemon's -d option. Change it there.",
+      "unknown": "Unexpected error. Check the Home Assistant log."
     },
     "abort": {
-      "no_options": "There is nothing to configure for this entry: this backend does not choose its own serial port, and Wi-Fi settings only exist on an ekey device.",
+      "token_saved": "Token saved and accepted. The integration is reloading with it.",
+      "token_saved_unverified": "Token saved. It could not be checked, because the backend did not answer on /app/v1 — it may have no app layer, or be briefly unreachable. If users and fingerprints stay unavailable after the reload, the token is the first thing to re-check.",
+      "token_cleared": "Token removed. The scanner is still reported, but users, fingerprints, actions and automations need a token and are now unavailable.",
+      "token_unchanged": "That is already the stored token — nothing changed.",
       "serial_unavailable": "The backend did not answer with its serial-port settings. It may be unreachable, or it may not choose its own port.",
       "serial_read_only": "The scanner is on {port}, and that is set {where}, not in Home Assistant. Change it there.",
       "serial_saved": "Saved. The scanner will be connected on {port} within 30 seconds — no restart needed.",

@@ -282,22 +282,128 @@ class EkeyOptionsFlow(config_entries.OptionsFlow):
         conn = EkeyConnection.from_entry(self._config_entry)
 
         self._serial = await self._async_serial_state()
-        menu_options: list[str] = []
+        # The token is always offered, and first: every entry has one (optional on a
+        # local daemon, required on a device), and it gates the steps below — they all
+        # call /app/v1, which is what the token guards. There is therefore no longer a
+        # case where this dialog has nothing to show, which is why the old
+        # `no_options` abort is gone.
+        menu_options: list[str] = ["token"]
         if self._serial is not None:
             menu_options.append("serial")
         if conn.use_ssl:
             menu_options.extend(["wifi_push", "wifi_reset"])
 
-        if not menu_options:
-            # A local daemon whose port was pinned with -d, or a device with the sensor
-            # on fixed pins: there is genuinely nothing here to set.
-            return self.async_abort(reason="no_options")
-        if menu_options == ["serial"]:
-            # One entry is not a menu. This is the ordinary local-daemon case, where the
-            # port is the only thing this dialog does.
-            return await self.async_step_serial()
+        if menu_options == ["token"]:
+            # One entry is not a menu. A device with the sensor on fixed pins, or a
+            # daemon whose port was pinned with -d, has nothing else to set here.
+            return await self.async_step_token()
 
         return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    # --------------------------------------------------------------- API token
+
+    async def async_step_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Set, replace or clear the API token this entry authenticates with.
+
+        This is the one step here that writes to Home Assistant rather than to the
+        backend: the token is a credential the rest of the integration reads out of
+        ``entry.data`` through ``EkeyConnection.from_entry``.
+
+        The reauth flow cannot cover this. Reauth only starts when a *stored* token is
+        rejected, and on a local daemon the token is optional — so an entry created
+        without one has nothing to reject, and an operator who later regenerates the
+        token on the System tab had no way in short of deleting the entry and building
+        it again.
+        """
+        entry = self._config_entry
+        conn = EkeyConnection.from_entry(entry)
+        host = entry.data.get(CONF_HOST, "")
+
+        # Required on a device (HTTPS): its whole API sits behind the bearer token, so
+        # a blank one would take the entry offline. Optional on a local daemon, where
+        # clearing it is a legitimate choice — /api/v1 there needs no token, and the
+        # integration keeps working read-only without one.
+        key = vol.Required if conn.use_ssl else vol.Optional
+        schema = vol.Schema(
+            {
+                key(
+                    CONF_TOKEN,
+                    description={"suggested_value": entry.data.get(CONF_TOKEN) or ""},
+                ): str
+            }
+        )
+
+        def _form(errors: dict[str, str] | None = None) -> FlowResult:
+            return self.async_show_form(
+                step_id="token",
+                data_schema=schema,
+                errors=errors or {},
+                description_placeholders={"host": host},
+            )
+
+        if user_input is None:
+            return _form()
+
+        token = (user_input.get(CONF_TOKEN) or "").strip()
+        probe = EkeyConnection(
+            host=conn.host,
+            port=conn.port,
+            use_ssl=conn.use_ssl,
+            token=token or None,
+            verify_ssl=conn.verify_ssl,
+        )
+
+        # Reachability, and on a device the token itself — an ESP32 answers 401 on
+        # /api/v1/health when the bearer is wrong.
+        try:
+            await validate_input(self.hass, probe)
+        except CannotConnect:
+            return _form({"base": "cannot_connect"})
+        except InvalidAuth:
+            return _form({"base": "invalid_auth"})
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Unexpected exception while setting the API token")
+            return _form({"base": "unknown"})
+
+        # On a local daemon /api/v1 is unauthenticated, so the check above proves
+        # nothing about the token — what the token guards is /app/v1. Probe that too,
+        # or a wrong token would be stored without complaint and fail only later, which
+        # is the confusion this step exists to end.
+        unverified = False
+        if token:
+            try:
+                await EkeyAppClient(
+                    probe, get_session(self.hass, probe)
+                ).async_get_users()
+            except EkeyAuthError:
+                return _form({"base": "invalid_auth"})
+            except EkeyApiError as err:
+                # No app layer, or briefly unreachable: there is nothing to
+                # authenticate against, so the token cannot be judged either way.
+                # Store it and say so rather than implying it was checked.
+                _LOGGER.debug("Could not verify the token against /app/v1: %s", err)
+                unverified = True
+
+        stored = token or None
+        if stored == (entry.data.get(CONF_TOKEN) or None):
+            return self.async_abort(reason="token_unchanged")
+
+        self.hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_TOKEN: stored}
+        )
+        # Reload: the app client, the coordinators and the panel each captured the old
+        # token when the entry was set up, so none of them would pick this up on its own.
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(entry.entry_id)
+        )
+
+        if stored is None:
+            return self.async_abort(reason="token_cleared")
+        return self.async_abort(
+            reason="token_saved_unverified" if unverified else "token_saved"
+        )
 
     # ------------------------------------------------------------- serial port
 

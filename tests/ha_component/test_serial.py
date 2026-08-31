@@ -205,54 +205,58 @@ def port_default(result):
     return key.default()
 
 
-async def test_local_entry_goes_straight_to_the_port_picker():
-    """One menu entry is not a menu — the ordinary local-daemon case.
+async def test_local_entry_offers_the_token_and_the_port():
+    """A daemon has no Wi-Fi settings, so its menu is the token and the port.
 
-    A daemon has no Wi-Fi settings, so the port is the only thing this dialog does and
-    an intermediate one-item menu would be a click that decides nothing.
+    The port used to be reached directly, on the "one entry is not a menu" rule. The
+    token is offered for every entry — the backend can regenerate it at any time and
+    there is nowhere else to re-enter it — so a local daemon now has two entries.
     """
     session = FakeSession()
     session.add("GET", "/app/v1/serial", body=BODY)
 
     result = await options_flow(session).async_step_init()
 
-    assert result["type"] == "form"
-    assert result["step_id"] == "serial"
-    assert port_options(result) == ["/dev/ttyUSB0", "/dev/ttyS0"]
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["token", "serial"]
 
 
-async def test_remote_entry_gets_the_port_alongside_wifi():
-    """A device that has both offers both, in one menu."""
+async def test_remote_entry_gets_the_token_port_and_wifi():
+    """A device that has all three offers all three, in one menu."""
     session = FakeSession()
     session.add("GET", "/app/v1/serial", body=BODY)
 
     result = await options_flow(session, use_ssl=True).async_step_init()
 
     assert result["type"] == "menu"
-    assert result["menu_options"] == ["serial", "wifi_push", "wifi_reset"]
+    assert result["menu_options"] == ["token", "serial", "wifi_push", "wifi_reset"]
 
 
-async def test_a_device_with_fixed_pins_is_not_offered_the_port():
-    """501 means "this backend does not choose its own port" — so nothing is offered."""
+async def test_a_device_with_fixed_pins_falls_through_to_the_token():
+    """501 means "this backend does not choose its own port", so the port is not offered.
+
+    The token still is — it is the one setting every entry has — so where this used to
+    abort with ``no_options`` there is now exactly one entry, and one entry is not a menu.
+    """
     session = FakeSession()
     session.add("GET", "/app/v1/serial", status=501,
                 body={"error": "this backend does not choose its own serial port"})
 
     result = await options_flow(session).async_step_init()
 
-    assert result["type"] == "abort"
-    assert result["reason"] == "no_options"
+    assert result["type"] == "form"
+    assert result["step_id"] == "token"
 
 
 async def test_wifi_still_offered_when_the_port_is_not_a_setting():
-    """The two halves are independent: no port must not cost an ESP32 its Wi-Fi steps."""
+    """The halves are independent: no port must not cost an ESP32 its Wi-Fi steps."""
     session = FakeSession()
     session.add("GET", "/app/v1/serial", status=501, body={"error": "no"})
 
     result = await options_flow(session, use_ssl=True).async_step_init()
 
     assert result["type"] == "menu"
-    assert result["menu_options"] == ["wifi_push", "wifi_reset"]
+    assert result["menu_options"] == ["token", "wifi_push", "wifi_reset"]
 
 
 async def test_capabilities_saying_no_skips_the_request_entirely():
@@ -266,8 +270,9 @@ async def test_capabilities_saying_no_skips_the_request_entirely():
 
     result = await options_flow(session, caps=caps).async_step_init()
 
-    assert result["type"] == "abort"
-    assert result["reason"] == "no_options"
+    # The token remains, so this lands on that form rather than aborting — but the
+    # point of the test is the absent round trip, which is unchanged.
+    assert result["step_id"] == "token"
     assert session.calls == []
 
 
@@ -279,7 +284,7 @@ async def test_capabilities_that_never_said_are_still_asked():
 
     result = await options_flow(session, caps=caps).async_step_init()
 
-    assert result["step_id"] == "serial"
+    assert "serial" in result["menu_options"]
 
 
 async def test_form_preselects_a_by_id_selection():
@@ -291,7 +296,9 @@ async def test_form_preselects_a_by_id_selection():
     session = FakeSession()
     session.add("GET", "/app/v1/serial", body=BODY)
 
-    result = await options_flow(session).async_step_init()
+    # The port step directly: reaching it through the menu is covered above, and this
+    # test is about the form's contents.
+    result = await options_flow(session).async_step_serial()
 
     assert port_default(result) == "/dev/ttyUSB0"
 
@@ -300,7 +307,7 @@ async def test_form_has_no_default_when_nothing_is_chosen_yet():
     session = FakeSession()
     session.add("GET", "/app/v1/serial", body=dict(BODY, selected="", active=""))
 
-    result = await options_flow(session).async_step_init()
+    result = await options_flow(session).async_step_serial()
 
     assert port_default(result) is None
 
@@ -312,7 +319,7 @@ async def test_a_port_that_is_set_elsewhere_is_read_only_and_says_where():
         BODY, editable=False, source="cli", active="/dev/ttyUSB0", bound=True,
         applies="restart"))
 
-    result = await options_flow(session).async_step_init()
+    result = await options_flow(session).async_step_serial()
 
     assert result["type"] == "abort"
     assert result["reason"] == "serial_read_only"
@@ -437,11 +444,14 @@ async def test_a_rotated_token_is_an_auth_error_on_the_form():
 
 
 async def test_an_empty_port_list_is_not_offered():
-    """A backend that answers but enumerated nothing has no choice to present."""
+    """A backend that answers but enumerated nothing has no choice to present.
+
+    So the port does not reach the menu, which leaves the token as the only entry.
+    """
     session = FakeSession()
     session.add("GET", "/app/v1/serial", body=dict(BODY, ports=[]))
 
     result = await options_flow(session).async_step_init()
 
-    assert result["type"] == "abort"
-    assert result["reason"] == "no_options"
+    assert result["type"] == "form"
+    assert result["step_id"] == "token"
