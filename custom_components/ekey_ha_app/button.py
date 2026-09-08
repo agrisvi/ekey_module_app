@@ -10,13 +10,20 @@ import logging
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, CONF_DAEMON_HOST, CONF_DAEMON_PORT
+from .const import CONF_DAEMON_HOST, CONF_DAEMON_PORT, DOMAIN
 from .coordinator import EkeyDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# One, not zero, and the reason is the bus rather than Home Assistant. A press is a
+# command to a scanner on an RS-485 segment with a single master; two LED commands
+# issued at once would interleave on the wire. Serialising them here costs nothing —
+# a press is a one-shot, and nobody presses both LEDs simultaneously by hand — and
+# removes a class of failure that would only ever appear in a script.
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
@@ -36,10 +43,14 @@ async def async_setup_entry(
 class EkeyLEDGreenButton(ButtonEntity):
     """Button to turn LED green."""
 
+    # See the note in sensor.py: the name is the entity's part only, because Home
+    # Assistant prefixes the device name itself.
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: EkeyDataUpdateCoordinator, entry: ConfigEntry) -> None:
         """Initialize the button."""
         self.coordinator = coordinator
-        self._attr_name = "ekey LED Green"
+        self._attr_name = "LED green"
         self._attr_unique_id = f"{entry.entry_id}_led_green"
         self._attr_icon = "mdi:led-on"
 
@@ -58,10 +69,12 @@ class EkeyLEDGreenButton(ButtonEntity):
 class EkeyLEDRedButton(ButtonEntity):
     """Button to turn LED red."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: EkeyDataUpdateCoordinator, entry: ConfigEntry) -> None:
         """Initialize the button."""
         self.coordinator = coordinator
-        self._attr_name = "ekey LED Red"
+        self._attr_name = "LED red"
         self._attr_unique_id = f"{entry.entry_id}_led_red"
         self._attr_icon = "mdi:led-on"
 

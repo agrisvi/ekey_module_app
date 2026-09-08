@@ -1,11 +1,10 @@
 """Data update coordinator for ekey scanner."""
-import logging
 import asyncio
 import json
+import logging
 from typing import Any
 
 import aiohttp
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -31,7 +30,7 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
         self,
         hass: HomeAssistant,
         session: aiohttp.ClientSession,
-        conn: "EkeyConnection",
+        conn: EkeyConnection,
     ) -> None:
         """Initialize the coordinator.
 
@@ -57,33 +56,33 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
         """Fetch data from ekey scanner."""
         try:
             _LOGGER.debug("Fetching device info from %s", self.base_url)
-            
+
             # Get device information (required)
             device_info = await self._get_device_info()
-            
+
             # Small delay to avoid overwhelming daemon with concurrent requests
             await asyncio.sleep(0.5)
-            
+
             # Get enrolled fingerprints (optional - may timeout if scanner is busy)
             try:
                 fingerprints = await self._get_fingerprints()
             except UpdateFailed as err:
                 _LOGGER.warning("Failed to get fingerprints (scanner may be busy): %s", err)
                 fingerprints = {"num_aps": 0, "aps": []}
-            
+
             _LOGGER.debug("Successfully fetched scanner data")
-            
+
             return {
                 "device": device_info,
                 "fingerprints": fingerprints,
             }
-        
+
         except aiohttp.ClientError as err:
             _LOGGER.error("Error communicating with ekey scanner at %s: %s", self.base_url, err)
             raise UpdateFailed(f"Error communicating with ekey scanner: {err}") from err
-        except asyncio.TimeoutError as err:
+        except TimeoutError as err:
             _LOGGER.error("Timeout connecting to ekey scanner at %s", self.base_url)
-            raise UpdateFailed(f"Timeout connecting to ekey scanner") from err
+            raise UpdateFailed("Timeout connecting to ekey scanner") from err
         except Exception as err:
             _LOGGER.exception("Unexpected error fetching ekey scanner data: %s", err)
             raise UpdateFailed(f"Unexpected error: {err}") from err
@@ -91,9 +90,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
     async def _get_device_info(self) -> dict[str, Any]:
         """Get device information from scanner."""
         url = f"{self.base_url}{API_DEVICE}"
-        
+
         _LOGGER.debug("GET %s", url)
-        
+
         try:
             async with self.session.get(url, headers=self.conn.headers(), timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if response.status == 200:
@@ -106,7 +105,7 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         raw_text = await response.text()
                         _LOGGER.error("JSON parse error (will try cleaning): %s", json_err)
                         _LOGGER.debug("Raw response text: %r", raw_text[:500])
-                        
+
                         try:
                             # Clean control characters and try again
                             cleaned_text = clean_json_string(raw_text)
@@ -117,20 +116,20 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         except Exception as clean_err:
                             _LOGGER.error("Failed to parse even after cleaning: %s", clean_err)
                             raise UpdateFailed(f"Failed to parse device info JSON: {json_err}")
-                
+
                 error_text = await response.text()
                 _LOGGER.error("Device info request failed with status %s: %s", response.status, error_text)
                 raise UpdateFailed(f"Device info request failed with status {response.status}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.error("Timeout getting device info from %s", url)
             raise
 
     async def _get_fingerprints(self) -> dict[str, Any]:
         """Get list of enrolled fingerprints."""
         url = f"{self.base_url}{API_FINGERPRINTS}"
-        
+
         _LOGGER.debug("GET %s", url)
-        
+
         try:
             async with self.session.get(url, headers=self.conn.headers(), timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if response.status == 200:
@@ -143,7 +142,7 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         raw_text = await response.text()
                         _LOGGER.error("JSON parse error getting fingerprints (will try cleaning): %s", json_err)
                         _LOGGER.debug("Raw fingerprints text: %r", raw_text[:500])
-                        
+
                         try:
                             # Clean control characters and try again
                             cleaned_text = clean_json_string(raw_text)
@@ -154,17 +153,17 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         except Exception as clean_err:
                             _LOGGER.error("Failed to parse fingerprints even after cleaning: %s", clean_err)
                             raise UpdateFailed(f"Failed to parse fingerprints JSON: {json_err}")
-                
+
                 # 504 means scanner timeout - this can happen if scanner is busy
                 if response.status == 504:
                     error_text = await response.text()
                     _LOGGER.debug("Scanner timeout getting fingerprints: %s", error_text)
-                    raise UpdateFailed(f"Scanner timeout (504)")
-                
+                    raise UpdateFailed("Scanner timeout (504)")
+
                 error_text = await response.text()
                 _LOGGER.error("Fingerprints request failed with status %s: %s", response.status, error_text)
                 raise UpdateFailed(f"Fingerprints request failed with status {response.status}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.debug("Timeout getting fingerprints from %s", url)
             raise UpdateFailed("Request timeout")
 
@@ -181,9 +180,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
             "Apnot": 1,  # Enable notifications
             "id": 1,
         }
-        
+
         _LOGGER.info("POST %s with payload: %s", url, payload)
-        
+
         try:
             async with self.session.post(
                 url,
@@ -198,7 +197,7 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         raw_text = await response.text()
                         _LOGGER.error("JSON parse error in enrollment response: %s", json_err)
                         _LOGGER.debug("Raw enrollment response: %r", raw_text[:500])
-                        
+
                         cleaned_text = clean_json_string(raw_text)
                         try:
                             # Clean and retry
@@ -221,17 +220,17 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
 
                         _LOGGER.error("Failed enrollment parse after cleaning: %s", json_err)
                         raise UpdateFailed(f"Failed to parse enrollment JSON: {json_err}")
-                
+
                 # Handle scanner timeout
                 if response.status == 504:
                     error_text = await response.text()
                     _LOGGER.warning("Scanner timeout starting enrollment: %s", error_text)
-                    raise UpdateFailed(f"Scanner timeout (504)")
-                
+                    raise UpdateFailed("Scanner timeout (504)")
+
                 error_text = await response.text()
                 _LOGGER.error("Enroll request failed with status %s: %s", response.status, error_text)
                 raise UpdateFailed(f"Enroll request failed with status {response.status}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.error("Timeout starting enrollment at %s", url)
             raise UpdateFailed("Request timeout")
 
@@ -246,9 +245,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
             "Apid": apid,
             "id": 1,
         }
-        
+
         _LOGGER.info("POST %s with payload: %s", url, payload)
-        
+
         try:
             async with self.session.post(
                 url,
@@ -268,17 +267,17 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         except Exception as clean_err:
                             _LOGGER.error("Failed to parse confirm response: %s", clean_err)
                             raise UpdateFailed(f"Failed to parse JSON: {json_err}")
-                
+
                 if response.status == 504:
                     error_text = await response.text()
                     _LOGGER.warning("Scanner timeout on confirm (not critical - will check SSE for completion): %s", error_text)
-                    raise UpdateFailed(f"Scanner timeout (504) - monitoring via SSE")
-                
+                    raise UpdateFailed("Scanner timeout (504) - monitoring via SSE")
+
                 error_text = await response.text()
                 _LOGGER.error("Confirm enrollment failed with status %s: %s", response.status, error_text)
                 raise UpdateFailed(f"Confirm enrollment failed with status {response.status}")
-        
-        except asyncio.TimeoutError:
+
+        except TimeoutError:
             _LOGGER.warning("Timeout confirming enrollment (not critical - will check SSE for completion)")
             raise UpdateFailed("Request timeout - monitoring via SSE")
 
@@ -289,9 +288,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
             "Apid": apid,
             "id": 1,
         }
-        
+
         _LOGGER.info("POST %s with payload: %s", url, payload)
-        
+
         try:
             async with self.session.post(
                 url,
@@ -311,16 +310,16 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
                         except Exception as clean_err:
                             _LOGGER.error("Failed to parse quit response: %s", clean_err)
                             raise UpdateFailed(f"Failed to parse JSON: {json_err}")
-                
+
                 if response.status == 504:
                     error_text = await response.text()
                     _LOGGER.warning("Scanner timeout quitting enrollment: %s", error_text)
-                    raise UpdateFailed(f"Scanner timeout (504)")
-                
+                    raise UpdateFailed("Scanner timeout (504)")
+
                 error_text = await response.text()
                 _LOGGER.error("Quit enrollment failed with status %s: %s", response.status, error_text)
                 raise UpdateFailed(f"Quit enrollment failed with status {response.status}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.error("Timeout quitting enrollment at %s", url)
             raise UpdateFailed("Request timeout")
 
@@ -329,7 +328,7 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
         url = f"{self.base_url}{API_FINGERPRINTS}/{apid}"
 
         _LOGGER.info("DELETE %s", url)
-        
+
         async with self.session.delete(url, headers=self.conn.headers(), timeout=aiohttp.ClientTimeout(total=10)) as response:
             success = response.status == 200
             if success:
@@ -347,9 +346,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
             "Brightness": brightness,
             "id": 1,
         }
-        
+
         _LOGGER.info("POST %s with payload: %s", url, payload)
-        
+
         async with self.session.post(
             url,
             json=payload,
@@ -377,9 +376,9 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
             "State": state,
             "id": 1,
         }
-        
+
         _LOGGER.info("POST %s with payload: %s", url, payload)
-        
+
         async with self.session.post(
             url,
             json=payload,

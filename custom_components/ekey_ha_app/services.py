@@ -1,9 +1,9 @@
 """Services for ekey Home Assistant App."""
+import asyncio
 import logging
 import uuid
-import asyncio
-import voluptuous as vol
 
+import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -119,13 +119,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     prefers the backend and falls back to the preserved legacy map) and deletions
     are mirrored into the backend as well as the legacy map.
     """
-    store = person_map.async_get_store(hass)
 
     async def handle_enroll_fingerprint(call: ServiceCall) -> None:
         """Handle enroll_fingerprint service call."""
         person_id = call.data[ATTR_PERSON_ID]
         finger = call.data[ATTR_FINGER]
-        
+
         # Resolve which scanner to enroll on (from the optional 'scanner' field).
         entry_id = _resolve_entry_id(hass, call)
         coordinator = hass.data[DOMAIN][entry_id]["coordinator"]
@@ -152,7 +151,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 "finger": finger,
             }
             _LOGGER.debug("Stored pending enrollment: %s finger %d -> %s", person_id, finger, apid[:8] + "...")
-            
+
             # Start enrollment asynchronously with shorter timeout
             # The enrollment progress will be monitored via SSE events
             try:
@@ -169,14 +168,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     error_msg = result.get("error_message", "Unknown error")
                     _LOGGER.error("Enrollment rejected by daemon: %s", error_msg)
                     raise Exception(f"Enrollment rejected: {error_msg}")
-                    
-            except asyncio.TimeoutError:
+
+            except TimeoutError:
                 _LOGGER.warning("Enrollment command timed out, but will monitor via SSE events")
                 # Don't raise - enrollment might still work via SSE monitoring
             except Exception as enroll_err:
                 _LOGGER.warning("Enrollment command failed: %s (will monitor via SSE)", enroll_err)
                 # Don't raise - enrollment might still work via SSE monitoring
-            
+
             # Fire event to indicate enrollment started
             hass.bus.async_fire("ekey_enrollment_started", {
                 "person_id": person_id,
@@ -185,7 +184,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 "apid": apid,
                 "status": "monitoring",
             })
-            
+
             # Create initial notification
             await hass.services.async_call(
                 "persistent_notification",
@@ -201,11 +200,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     "notification_id": f"ekey_enrollment_{apid}",
                 },
             )
-            
+
         except Exception as err:
             _LOGGER.error("Failed to enroll fingerprint: %s", err)
             raise
-    
+
     async def handle_delete_fingerprint(call: ServiceCall) -> None:
         """Handle delete_fingerprint service call."""
         person_id = call.data[ATTR_PERSON_ID]
@@ -258,11 +257,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     _LOGGER.error("Failed to delete fingerprint from scanner")
             else:
                 _LOGGER.warning("No fingerprint found for %s, finger %s", person_id, finger)
-        
+
         except Exception as err:
             _LOGGER.error("Failed to delete fingerprint: %s", err)
             raise
-    
+
     async def handle_set_led_brightness(call: ServiceCall) -> None:
         """Handle set_led_brightness service call."""
         brightness = call.data[ATTR_BRIGHTNESS]
@@ -277,7 +276,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except Exception as err:
             _LOGGER.error("Failed to set LED brightness: %s", err)
             raise
-    
+
     # Register services
     hass.services.async_register(
         DOMAIN,
@@ -285,14 +284,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         handle_enroll_fingerprint,
         schema=SERVICE_ENROLL_FINGERPRINT_SCHEMA,
     )
-    
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_DELETE_FINGERPRINT,
         handle_delete_fingerprint,
         schema=SERVICE_DELETE_FINGERPRINT_SCHEMA,
     )
-    
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_LED_BRIGHTNESS,

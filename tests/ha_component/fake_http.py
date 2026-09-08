@@ -33,7 +33,7 @@ class FakeResponse:
     async def text(self) -> str:
         return self._text
 
-    async def __aenter__(self) -> "FakeResponse":
+    async def __aenter__(self) -> FakeResponse:
         return self
 
     async def __aexit__(self, *exc_info) -> bool:

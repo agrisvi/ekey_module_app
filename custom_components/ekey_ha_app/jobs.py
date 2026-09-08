@@ -33,8 +33,9 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 
@@ -47,6 +48,7 @@ from .api import (
     EkeyTemplateRejected,
 )
 from .const import APP_HTTP_BODY_MAX, DOMAIN, EVENT_VAULT_JOB
+
 # One-way on purpose: enroll.py reaches back for async_capture_enrolled through a
 # deferred import inside the function that needs it, so this stays acyclic.
 from .enroll import EVENT_ENROLL_PROGRESS
@@ -962,7 +964,7 @@ class VaultJobManager:
             while not done.is_set():
                 try:
                     await asyncio.wait_for(done.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     waited += 1.0
                     if job.cancelling:
                         job.cancelled = True

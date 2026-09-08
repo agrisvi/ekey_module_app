@@ -20,7 +20,10 @@ misattributes a fingerprint:
   and must never be counted as pushable;
 * the view model never carrying template hex to a browser.
 """
-from custom_components.ekey_ha_app.templates import DEFAULT_DOMAIN_ID, parse_template_hex
+from custom_components.ekey_ha_app.templates import (
+    DEFAULT_DOMAIN_ID,
+    parse_template_hex,
+)
 from custom_components.ekey_ha_app.vault import (
     NAME_KEY_PREFIX,
     build_records_view,

@@ -9,8 +9,11 @@ Run with:
     pytest tests/ha_component/ -v
 """
 import json
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from custom_components.ekey_ha_app.connection import EkeyConnection
 
 # ---------------------------------------------------------------------------
 # Import the module under test.
@@ -19,11 +22,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 #   from custom_components.ekey_ha_app.coordinator import ...
 # ---------------------------------------------------------------------------
 from custom_components.ekey_ha_app.coordinator import (
-    clean_json_string,
     EkeyDataUpdateCoordinator,
+    clean_json_string,
 )
-from custom_components.ekey_ha_app.connection import EkeyConnection
-
 
 # ===========================================================================
 # clean_json_string
@@ -260,8 +261,8 @@ class TestEkeyDataUpdateCoordinatorFetch:
 
     async def test_connection_error_raises_update_failed(self):
         """A connection error must raise UpdateFailed (not crash)."""
-        from homeassistant.helpers.update_coordinator import UpdateFailed
         import aiohttp
+        from homeassistant.helpers.update_coordinator import UpdateFailed
 
         coord = self._make_coordinator()
 

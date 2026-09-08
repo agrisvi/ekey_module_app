@@ -1,45 +1,49 @@
 """ekey Home Assistant App - Integration for ekey dLine fingerprint scanner."""
-import logging
 import asyncio
+import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
+)
+from homeassistant.helpers import (
     issue_registry as ir,
 )
 from homeassistant.helpers.start import async_at_started
-
 from homeassistant.helpers.storage import Store
 
+from . import person_map, vault, ws_api
+from .api import EkeyApiError, EkeyAppClient
+from .app_coordinator import EkeyAppCoordinator
+from .connection import EkeyConnection, get_session
 from .const import (
-    DOMAIN,
     CONF_DAEMON_HOST,
     CONF_DAEMON_PORT,
     CONF_SSL,
     CONF_TOKEN,
     CONF_VERIFY_SSL,
     DEFAULT_VERIFY_SSL,
-    EVENT_ENROLLMENT_STATE,
+    DOMAIN,
     ENROLL_STATE_WAIT_FOR_CONFIRMATION,
+    EVENT_ACCESS_DENIED,
+    EVENT_ACCESS_GRANTED,
+    EVENT_ENROLLMENT_STATE,
     EVENT_FINGERPRINT_MATCHED,
     EVENT_FINGERPRINT_NOT_MATCHED,
-    EVENT_ACCESS_GRANTED,
-    EVENT_ACCESS_DENIED,
 )
-from .api import EkeyApiError, EkeyAppClient, EkeyAuthError
-from .app_coordinator import EkeyAppCoordinator
-from .connection import EkeyConnection, get_session
 from .coordinator import EkeyDataUpdateCoordinator
 from .enroll import EnrollManager
-from .panel import async_register_panel, async_remove_panel
-from .sse_listener import EkeySSEListener
-from .services import async_setup_services, async_unload_services
 from .jobs import async_get_jobs
-from . import person_map, vault, ws_api
+from .panel import async_register_panel, async_remove_panel
+from .services import async_setup_services, async_unload_services
+from .sse_listener import EkeySSEListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -281,7 +285,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Create coordinator for polling data
     coordinator = EkeyDataUpdateCoordinator(hass, session, conn)
-    
+
     # Try initial refresh, but allow setup to complete even if it fails
     # (coordinator will keep retrying in the background)
     try:
@@ -289,11 +293,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.warning("Initial refresh failed (will retry): %s", err)
         # Don't raise - allow setup to complete so entities are created
-    
+
     # Register device in device registry
     device_registry = dr.async_get(hass)
     device_info = coordinator.data.get("device", {}) if coordinator.data else {}
-    
+
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, f"{host}:{port}")},
@@ -309,7 +313,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     #
     # Create SSE listener for async events
     sse_listener = EkeySSEListener(hass, session, conn, entry.entry_id)
-    
+
     # The app layer: the backend owns users, their finger slots, actions and
     # automations. This integration is a front-end for that document, never a
     # second source of truth — so there is a client, a coordinator that watches it,
@@ -340,8 +344,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # that is briefly unreachable, must not stop the scanner half from loading.
     try:
         await app_coordinator.async_config_entry_first_refresh()
-    except EkeyAuthError as err:
+    except ConfigEntryAuthFailed as err:
         # A rotated token (a factory reset does that) is a reauth, not an outage.
+        #
+        # Two things about this clause are load-bearing. It catches
+        # ConfigEntryAuthFailed and not EkeyAuthError, because the coordinator
+        # converts one into the other — the previous `except EkeyAuthError` could
+        # never fire, since UpdateFailed reached the broad clause below and the
+        # reauth flow was therefore unreachable in normal operation.
+        #
+        # And starting the reauth here is not redundant with what the coordinator
+        # does on a periodic refresh. `async_config_entry_first_refresh` passes
+        # `raise_on_auth_failed=True`, and that branch re-raises BEFORE the
+        # `async_start_reauth()` call — see homeassistant/helpers/
+        # update_coordinator.py. The first refresh is the one path where starting it
+        # is the caller's job.
         _LOGGER.warning("App layer rejected our token: %s", err)
         entry.async_start_reauth(hass)
     except Exception as err:  # noqa: BLE001 — see above; never block setup
@@ -369,7 +386,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sse_listener.start(),
         "ekey_sse_listener"
     )
-    
+
     # Set up automatic enrollment confirmation
     # When enrollment reaches wait_for_confirmation state (enstat=35), automatically confirm
     async def handle_enrollment_state(event):
@@ -560,7 +577,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register the single combined enrollment-state listener
     hass.bus.async_listen(EVENT_ENROLLMENT_STATE, handle_enrollment_state)
-    
+
     # Handle enrollment completion events
     async def handle_enrollment_complete(event):
         """Handle enrollment completion from SSE."""
@@ -575,14 +592,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if success and apid:
             _LOGGER.info("Enrollment complete event received for APID=%s", _fmt_apid(apid))
-            
+
             # Save to permanent storage
             pending = hass.data[DOMAIN][entry.entry_id].get("pending_enrollments", {})
             if apid in pending:
                 person_id = pending[apid]["person_id"]
                 person_name = pending[apid].get("person_name", person_id)
                 finger = pending[apid]["finger"]
-                
+
                 # The person-based service path still records into the legacy map,
                 # which keeps existing scripts and blueprints working unchanged.
                 stored = await person_map.async_load(hass)
@@ -608,7 +625,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.bus.async_fire("ekey_ha_storage_updated")
 
                 _LOGGER.info("Saved fingerprint mapping: %s finger %d -> %s", person_id, finger, _fmt_apid(apid))
-                
+
                 # Show success notification
                 await hass.services.async_call(
                     "persistent_notification",
@@ -623,7 +640,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "notification_id": f"ekey_enrollment_{apid}",
                     },
                 )
-                
+
                 # Auto-dismiss success notification after 10 seconds
                 async def dismiss_notification():
                     await asyncio.sleep(10)
@@ -633,12 +650,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         {"notification_id": f"ekey_enrollment_{apid}"},
                     )
                 hass.async_create_task(dismiss_notification())
-                
+
                 # Remove from pending enrollments
                 pending.pop(apid, None)
             else:
                 _LOGGER.warning("Enrollment completed for APID=%s but not found in pending enrollments", _fmt_apid(apid))
-            
+
             # Wait 3 seconds for scanner to finish processing before querying device info
             await asyncio.sleep(3)
             _LOGGER.debug("Refreshing coordinator data after enrollment completion")
@@ -646,7 +663,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             state = event.data.get("state", "unknown")
             _LOGGER.error("Enrollment failed for APID=%s: %s", _fmt_apid(apid), state)
-            
+
             # Remove from pending enrollments on failure
             if apid:
                 pending = hass.data[DOMAIN][entry.entry_id].get("pending_enrollments", {})
@@ -655,7 +672,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     person_name = pending[apid].get("person_name", person_id)
                     finger = pending[apid]["finger"]
                     _LOGGER.info("Removed failed enrollment from pending: %s finger %d", person_id, finger)
-                    
+
                     # Show error notification
                     await hass.services.async_call(
                         "persistent_notification",
@@ -671,11 +688,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "notification_id": f"ekey_enrollment_{apid}",
                         },
                     )
-                    
+
                     pending.pop(apid, None)
-    
+
     hass.bus.async_listen("ekey_enrollment_complete", handle_enrollment_complete)
-    
+
     # Handle green LED on fingerprint match
     async def handle_flash_green_led(event):
         """Turn on green LED when fingerprint matches — only on the scanner that matched."""
@@ -690,11 +707,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(">>> Green LED activated successfully")
             except Exception as err:
                 _LOGGER.warning(">>> Green LED command failed (daemon busy or timeout): %s", err)
-        
+
         hass.async_create_task(_set_green_led())
-    
+
     hass.bus.async_listen("ekey_flash_green_led", handle_flash_green_led)
-    
+
     # Handle red LED on fingerprint not matched
     async def handle_flash_red_led(event):
         """Turn on red LED when fingerprint doesn't match — only on the scanner that matched."""
@@ -709,11 +726,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(">>> Red LED activated successfully")
             except Exception as err:
                 _LOGGER.warning(">>> Red LED command failed (daemon busy or timeout): %s", err)
-        
+
         hass.async_create_task(_set_red_led())
-    
+
     hass.bus.async_listen("ekey_flash_red_led", handle_flash_red_led)
-    
+
     # Clear out entities earlier versions created, before the platforms come up.
     _async_remove_retired_entities(hass, entry)
 
@@ -734,7 +751,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Forward the setup to platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    
+
     # Registered once for the domain, not once per entry — but each handler now
     # resolves the scanner from the EVENT rather than closing over the first entry.
     # That was a real bug: with two scanners, every logbook row was attributed to
@@ -852,7 +869,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             })
 
         hass.bus.async_listen(EVENT_FINGERPRINT_NOT_MATCHED, handle_fingerprint_not_matched_activity)
-        
+
         # Show setup complete notification only on first installation
         _setup_store = Store(hass, 1, f"{DOMAIN}.setup_notified")
         _setup_data = await _setup_store.async_load()
@@ -903,7 +920,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # user, which is the same information plus a way to act on it.
 
     _LOGGER.info("ekey HA App integration setup complete for %s:%s", host, port)
-    
+
     return True
 
 

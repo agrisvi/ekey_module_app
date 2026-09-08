@@ -33,9 +33,9 @@ from custom_components.ekey_ha_app.const import DOMAIN
 from custom_components.ekey_ha_app.jobs import (
     REASON_ENROLL_FAILED,
     REASON_LIST_UNKNOWN,
-    REASON_STILL_PRESENT,
     REASON_NOT_VERIFIED,
     REASON_SENSOR_FULL,
+    REASON_STILL_PRESENT,
     REASON_TEMPLATE_ONLY,
     REASON_USERS_DOC_TOO_LARGE,
     REASON_VARIANT_MISMATCH,

@@ -21,9 +21,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.ekey_ha_app import ws_api
 from custom_components.ekey_ha_app import jobs as jobs_mod
 from custom_components.ekey_ha_app import vault as vault_mod
+from custom_components.ekey_ha_app import ws_api
 from custom_components.ekey_ha_app.api import EkeyAppClient
 from custom_components.ekey_ha_app.backup import create
 from custom_components.ekey_ha_app.connection import EkeyConnection

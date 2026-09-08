@@ -34,7 +34,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
@@ -142,7 +142,7 @@ def create(
     CPU-bound when a passphrase is given (see :func:`_derive`); call via
     :func:`async_create`.
     """
-    stamp = now or datetime.now(timezone.utc)
+    stamp = now or datetime.now(UTC)
     header: dict[str, Any] = {
         "format": BACKUP_FORMAT,
         "version": BACKUP_VERSION,

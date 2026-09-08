@@ -1,7 +1,7 @@
 """Logbook support for ekey Home Assistant App."""
 from homeassistant.core import HomeAssistant, callback
 
-from .const import DOMAIN, EVENT_ACCESS_GRANTED, EVENT_ACCESS_DENIED
+from .const import DOMAIN, EVENT_ACCESS_DENIED, EVENT_ACCESS_GRANTED
 
 
 @callback

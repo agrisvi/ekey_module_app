@@ -1,0 +1,74 @@
+# Ruff configuration for the ekey Home Assistant integration.
+#
+# There is no build here — this integration is installed by copying
+# custom_components/ekey_ha_app/ into a Home Assistant config directory, and HACS
+# does the same. So this file exists ONLY to configure the linter, which is why it
+# carries no [project] table and no packaging metadata.
+#
+# Run it the way CI does:
+#     ruff check custom_components tests
+#
+# WHAT IS DELIBERATELY *NOT* HERE
+#
+# `ruff format` is not run, and no format check is in CI. The existing code is not
+# ruff-formatted, and reformatting ~3800 statements in one commit would bury every
+# real change in whitespace for the next several releases while making `git blame`
+# useless on every line. Formatting is a separate decision from linting; this file
+# takes the linting half only.
+
+[tool.ruff]
+# 120, not Home Assistant core's 88. Core can use 88 because `ruff format` enforces
+# it mechanically; here the limit is only a guard against genuinely unreadable
+# lines, and 88 would have flagged 47 existing lines that are fine.
+line-length = 120
+# Matches requirements_test.txt: homeassistant >= 2026.6.0 needs Python 3.14.2+.
+target-version = "py314"
+
+[tool.ruff.lint]
+# The rules enabled here are the ones that pay for themselves on a codebase this
+# size and that pass TODAY — a linter that is red on arrival gets ignored, and an
+# ignored linter is worse than none because it also silences the next real finding.
+#
+#   E4/E7/E9  import, statement and syntax errors from pycodestyle
+#   F         pyflakes: unused imports, undefined names, unused locals
+#   W         whitespace, including the trailing whitespace this repo had 92 of
+#   I         import sorting
+#   UP        pyupgrade: constructs that are obsolete on the target Python
+#   ASYNC     async-specific traps — blocking calls in coroutines, mainly
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "ASYNC"]
+
+ignore = [
+    # ASYNC109 wants `asyncio.timeout()` at the call site instead of a `timeout`
+    # parameter. It does not fit here: `EkeyClient._request(timeout=...)` takes an
+    # `aiohttp.ClientTimeout` and hands it straight to `session.request()`, which is
+    # aiohttp's own mechanism and the reason the type is what it is —
+    # `ClientTimeout` distinguishes connect from sock_read, which a single
+    # `asyncio.timeout()` wrapper cannot express. The rest of the ASYNC group stays
+    # on, because a blocking call inside a coroutine is exactly what it should catch.
+    "ASYNC109",
+]
+
+# STAGED, NOT REJECTED. Each of these found real things when trialled; each also
+# needs judgement per site rather than a bulk fix, so they are listed here with
+# their counts as of 2026-09-02 instead of being silently dropped. Enable them one
+# at a time, in roughly this order:
+#
+#   E501    15 long lines. Mostly docstrings and log format strings.
+#   B904    12 `raise X` inside `except` without `from err`. Real: it loses the
+#           original traceback. Mechanical but each site wants a glance.
+#   BLE001  22 blind `except Exception`. Note 13 sites ALREADY carry
+#           `# noqa: BLE001`, so the author expected this rule — enabling it makes
+#           those comments meaningful again. Several are deliberate ("never block
+#           setup") and should keep the noqa with the reason spelled out.
+#   SIM105   4 `try/except/pass` that could be `contextlib.suppress`.
+#   RUF059  25 unused unpacked variables (`a, _b = f()`). Cosmetic; noisiest of
+#           the set, so last.
+#
+# Adding one of these to `select` above and fixing its sites is a good
+# self-contained contribution.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import Home Assistant helpers after tweaking sys.path, which is what the
+# existing `# noqa: E402` comments in test_retired_entities.py are for. E402 is not
+# in the selected set today; when it is, drop this and keep the noqas.
+"tests/**" = ["E402"]

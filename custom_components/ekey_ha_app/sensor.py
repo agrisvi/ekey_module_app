@@ -2,28 +2,32 @@
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.storage import Store
 
 from . import person_map
 from .const import (
-    DOMAIN,
     CONF_DAEMON_HOST,
     CONF_DAEMON_PORT,
+    DOMAIN,
     EVENT_FINGER_TOUCH,
     EVENT_FINGERPRINT_MATCHED,
     EVENT_FINGERPRINT_NOT_MATCHED,
-    STORAGE_KEY,
-    STORAGE_VERSION,
 )
 from .coordinator import EkeyDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Zero, meaning "no limit", because nothing here is polled per entity: two sensors
+# read a shared DataUpdateCoordinator and the third is pushed from the event bus.
+# The limit exists to stop a platform hammering a device with parallel refreshes,
+# and there are no per-entity requests to serialise. (The buttons are the opposite
+# case — see button.py.)
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -46,14 +50,22 @@ async def async_setup_entry(
 class EkeyDeviceInfoSensor(CoordinatorEntity, SensorEntity):
     """Sensor showing ekey scanner device information."""
 
+    # Home Assistant composes the friendly name as "{device} {entity}", so the name
+    # below must be the entity's part ALONE. The old names carried their own "ekey "
+    # prefix and read "ekey Scanner (host:port) ekey Scanner Info" on the device
+    # page. Existing installations keep their entity_ids — the registry keys those
+    # on unique_id, not on the name — so this changes what is displayed, not what
+    # automations refer to.
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: EkeyDataUpdateCoordinator, entry: ConfigEntry) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_name = "ekey Scanner Info"
+        self._attr_name = "Device info"
         self._attr_unique_id = f"{entry.entry_id}_device_info"
         self._attr_device_class = None
         self._entry = entry
-        
+
         host = entry.data.get(CONF_DAEMON_HOST, "localhost")
         port = entry.data.get(CONF_DAEMON_PORT, 8080)
         self._attr_device_info = DeviceInfo(
@@ -66,7 +78,7 @@ class EkeyDeviceInfoSensor(CoordinatorEntity, SensorEntity):
         """Return the state of the sensor."""
         if not self.coordinator.data or "device" not in self.coordinator.data:
             return None
-        
+
         device = self.coordinator.data["device"]
         sw_version = device.get("sw_version", "unknown")
         return f"v{sw_version}"
@@ -76,7 +88,7 @@ class EkeyDeviceInfoSensor(CoordinatorEntity, SensorEntity):
         """Return device attributes."""
         if not self.coordinator.data or "device" not in self.coordinator.data:
             return {}
-        
+
         device = self.coordinator.data["device"]
         return {
             "fw_api_version": device.get("fw_api_version"),
@@ -95,14 +107,16 @@ class EkeyDeviceInfoSensor(CoordinatorEntity, SensorEntity):
 class EkeyFingerprintCountSensor(CoordinatorEntity, SensorEntity):
     """Sensor showing number of enrolled fingerprints."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: EkeyDataUpdateCoordinator, entry: ConfigEntry) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_name = "ekey Enrolled Fingerprints"
+        self._attr_name = "Enrolled fingerprints"
         self._attr_unique_id = f"{entry.entry_id}_fingerprint_count"
         self._attr_native_unit_of_measurement = "fingerprints"
         self._entry = entry
-        
+
         host = entry.data.get(CONF_DAEMON_HOST, "localhost")
         port = entry.data.get(CONF_DAEMON_PORT, 8080)
         self._attr_device_info = DeviceInfo(
@@ -115,7 +129,7 @@ class EkeyFingerprintCountSensor(CoordinatorEntity, SensorEntity):
         """Return the number of enrolled fingerprints."""
         if not self.coordinator.data or "fingerprints" not in self.coordinator.data:
             return None
-        
+
         fingerprints = self.coordinator.data["fingerprints"]
         return fingerprints.get("num_aps", 0)
 
@@ -141,10 +155,11 @@ class EkeyLastAccessSensor(SensorEntity):
     """
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the sensor."""
-        self._attr_name = "ekey Last Access"
+        self._attr_name = "Last access"
         self._attr_unique_id = f"{entry.entry_id}_last_access"
         self._attr_native_value = None
         self._entry = entry

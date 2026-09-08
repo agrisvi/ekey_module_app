@@ -16,6 +16,11 @@
           "host": "Host",
           "port": "Port",
           "token": "API token (optional)"
+        },
+        "data_description": {
+          "host": "Where the daemon runs. Use localhost for the ekey add-on, or for a daemon on this same machine.",
+          "port": "The daemon's HTTP port. 8080 unless it was started with -p.",
+          "token": "Only needed for users, fingerprints, actions and automations. The daemon prints it once, as the 'App API token' line in its log. Left empty the scanner is still reported, but the panel cannot manage people."
         }
       },
       "remote": {
@@ -26,6 +31,12 @@
           "port": "Port",
           "token": "API token",
           "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "host": "The device's mDNS name or IP address — for example ekey.local.",
+          "port": "The HTTPS port the device serves on.",
+          "token": "The bearer token from the device's setup page. Required here: an ekey device authenticates every request.",
+          "verify_ssl": "Leave off for the device's own self-signed certificate. Turn it on only if you replaced that certificate with one Home Assistant already trusts."
         }
       },
       "reauth_confirm": {
@@ -33,6 +44,9 @@
         "description": "The backend at {host} rejected the stored API token. This normally means the token was regenerated, or the backend was factory reset. Enter the current token.",
         "data": {
           "token": "API token"
+        },
+        "data_description": {
+          "token": "The token the backend accepts now — from its System tab after regenerating, or from the daemon's 'App API token' log line."
         }
       }
     },
@@ -62,6 +76,9 @@
         "description": "The token this integration sends to the backend at {host}.\n\nThe backend prints it once when it is first minted, and the System tab can generate a new one at any time — which stops the old one working immediately. Paste the current token here after doing that.\n\nUsers, fingerprints, actions and automations all need it. A local daemon still reports the scanner without one, so leaving this empty is allowed there; an ekey device requires it.",
         "data": {
           "token": "API token"
+        },
+        "data_description": {
+          "token": "Emptying this field removes the stored token, which is allowed on a local daemon and not on an ekey device."
         }
       },
       "serial": {
@@ -69,6 +86,9 @@
         "description": "Which serial port the ekey scanner is wired to.\n\nCurrently: {current}\n\n{applies}\n\nPorts marked [system console] are the machine's own terminal — choosing one can switch it into RS485 mode, so it asks for confirmation first. A port marked [in use] is held by another process, which may be a previous run of this same backend.",
         "data": {
           "path": "Serial port"
+        },
+        "data_description": {
+          "path": "The port the scanner's RS485 adapter appears as. The list comes from the backend, not from Home Assistant."
         }
       },
       "serial_console": {
@@ -76,6 +96,9 @@
         "description": "{port} is this machine's own terminal. Using it for the scanner can switch that UART into RS485 mode and disturb whatever else is on it.",
         "data": {
           "confirm": "Yes, use this port anyway"
+        },
+        "data_description": {
+          "confirm": "Leave this off to go back and pick a different port."
         }
       },
       "wifi_push": {
@@ -87,6 +110,13 @@
           "mdns_host": "mDNS host name",
           "https_port": "HTTPS port",
           "reboot_now": "Reboot the device now to apply"
+        },
+        "data_description": {
+          "wifi_ssid": "The network the device should join. Changing it may move the device to a different address.",
+          "wifi_pass": "Left blank the stored password is kept. A wrong password is detected on the device and rolled back.",
+          "mdns_host": "The name the device answers to, without the .local suffix.",
+          "https_port": "The port the device serves HTTPS on. Changing it also changes the address this integration must use.",
+          "reboot_now": "Off stores the settings and applies them at the device's next restart."
         }
       },
       "wifi_reset": {
@@ -94,6 +124,9 @@
         "description": "This clears the stored Wi-Fi credentials and reboots the device into its setup portal, where it must be re-provisioned. The scanner pairing and API token are kept.",
         "data": {
           "confirm": "Yes, reset Wi-Fi and reboot into setup"
+        },
+        "data_description": {
+          "confirm": "The device leaves your network and has to be re-provisioned through its setup portal before Home Assistant can reach it again."
         }
       }
     },

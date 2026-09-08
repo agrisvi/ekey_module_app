@@ -70,7 +70,7 @@ class EkeyConnection:
         return {}
 
     @classmethod
-    def from_entry(cls, entry) -> "EkeyConnection":
+    def from_entry(cls, entry) -> EkeyConnection:
         """Build a connection from a config entry's stored data.
 
         Tolerant of legacy (v1) entries that predate the SSL/token fields.

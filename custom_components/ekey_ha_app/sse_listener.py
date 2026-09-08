@@ -1,24 +1,20 @@
 """SSE (Server-Sent Events) listener for ekey scanner events."""
-import logging
 import asyncio
 import json
+import logging
 from typing import Any
 
 import aiohttp
-
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
-from datetime import timedelta
 
 from .connection import EkeyConnection
 from .const import (
     API_EVENTS,
+    EVENT_ENROLLMENT_STATE,
     EVENT_FINGER_TOUCH,
     EVENT_FINGERPRINT_MATCHED,
     EVENT_FINGERPRINT_NOT_MATCHED,
-    EVENT_ENROLLMENT_STATE,
     MATCH_OK,
-    MATCH_NOT_OK,
 )
 from .util import clean_json_string
 
@@ -56,7 +52,7 @@ class EkeySSEListener:
     async def start(self) -> None:
         """Start listening to SSE events."""
         _LOGGER.info("Starting ekey SSE listener for %s", self.url)
-        
+
         while not self._stop_event.is_set():
             try:
                 async with self.session.get(
@@ -68,7 +64,7 @@ class EkeySSEListener:
                         _LOGGER.error("SSE connection failed with status %s", response.status)
                         await asyncio.sleep(5)
                         continue
-                    
+
                     _LOGGER.info("SSE connection established")
                     self._connection_lost_reported = False
 
@@ -125,15 +121,15 @@ class EkeySSEListener:
                             _LOGGER.debug("SSE connection closed by server")
                     except asyncio.CancelledError:
                         raise
-            
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+
+            except (TimeoutError, aiohttp.ClientError) as err:
                 if not self._connection_lost_reported:
                     _LOGGER.warning("Lost connection to ekey scanner: %s", err)
                     self.hass.bus.async_fire("ekey_connection_lost")
                     self._connection_lost_reported = True
-                
+
                 await asyncio.sleep(5)  # Retry after 5 seconds
-            
+
             except Exception as err:
                 _LOGGER.exception("Unexpected error in SSE listener: %s", err)
                 await asyncio.sleep(5)
@@ -142,7 +138,7 @@ class EkeySSEListener:
         """Stop listening to SSE events."""
         _LOGGER.info("Stopping ekey SSE listener")
         self._stop_event.set()
-        
+
         if self._task:
             self._task.cancel()
             try:
@@ -153,16 +149,16 @@ class EkeySSEListener:
     async def _handle_event(self, data: dict[str, Any]) -> None:
         """Handle incoming SSE event."""
         cmd = data.get("cmd")
-        
+
         if cmd == "NOTIFY_FINGER_TOUCH":
             _LOGGER.info(">>> Finger touch detected - waiting for match result")
             self.hass.bus.async_fire(EVENT_FINGER_TOUCH, data)
-        
+
         elif cmd == "NOTIFY_AP_MATCHED":
             apid = data.get("apid", "")
             apfar = data.get("apfar", -1)
             apfar_desc = data.get("apfar_desc", "")
-            
+
             # Tag every event with the originating scanner so handlers act only on it.
             origin = {"entry_id": self.entry_id, "scanner_id": self.scanner_id}
 
@@ -187,26 +183,26 @@ class EkeySSEListener:
                 # Fire event to turn on red LED (setSignalingState match negative)
                 _LOGGER.debug(">>> Sending setSignalingState(match negative) - Red LED on %s", self.scanner_id)
                 self.hass.bus.async_fire("ekey_flash_red_led", dict(origin))
-        
+
         elif cmd == "NOTIFY_AP_ENROLL_STATE":
             apid = data.get("apid", "")
             enstat = data.get("enstat", -1)
             entryc = data.get("entryc", 0)
             ennumtpl = data.get("ennumtpl", 0)
-            
+
             # Log enrollment progress
-            from .const import ENROLLMENT_STATES, ENROLL_STATE_FINISHED_SUCCESS
+            from .const import ENROLL_STATE_FINISHED_SUCCESS, ENROLLMENT_STATES
             state_name = ENROLLMENT_STATES.get(enstat, f"unknown({enstat})")
-            
+
             _LOGGER.info(
                 "Enrollment progress: APID=%s, state=%s, tries=%d, templates=%d",
                 apid[:8] + "...", state_name, entryc, ennumtpl
             )
-            
+
             # Fire enrollment state event for real-time UI updates
             _LOGGER.debug(">>> Firing EVENT_ENROLLMENT_STATE for APID=%s with data: %s", apid[:8] + "..." if apid else "None", data)
             self.hass.bus.async_fire(EVENT_ENROLLMENT_STATE, data)
-            
+
             # Check for completion states
             if enstat == ENROLL_STATE_FINISHED_SUCCESS:
                 _LOGGER.info("Enrollment completed successfully for APID=%s", apid[:8] + "...")
@@ -224,6 +220,6 @@ class EkeySSEListener:
                     "state": state_name,
                     "enstat": enstat,
                 })
-        
+
         else:
             _LOGGER.debug("Received unknown event: %s", cmd)

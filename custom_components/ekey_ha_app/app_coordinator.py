@@ -25,10 +25,11 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import EkeyApiError, EkeyAppClient, EkeyAuthError, EkeyNotFoundError
-from .capabilities import Capabilities, SOURCE_ABSENT, async_detect
+from .capabilities import SOURCE_ABSENT, Capabilities, async_detect
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,7 +68,14 @@ class EkeyAppCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 self.capabilities = await async_detect(self.client)
             except EkeyAuthError as err:
-                raise UpdateFailed(f"not authorized: {err}") from err
+                # ConfigEntryAuthFailed, not UpdateFailed: a rejected token is a
+                # thing the user has to fix, not an outage to retry. On a periodic
+                # refresh DataUpdateCoordinator turns this into
+                # `config_entry.async_start_reauth()` by itself, which is what puts
+                # the "Integration requires reconfiguration" prompt on the user's
+                # dashboard. As UpdateFailed it was indistinguishable from the
+                # backend being down, and the reauth flow was never reached.
+                raise ConfigEntryAuthFailed(f"not authorized: {err}") from err
 
         caps = self.capabilities
         if caps is not None and caps.source == SOURCE_ABSENT:
@@ -92,7 +100,8 @@ class EkeyAppCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.capabilities = None
             raise UpdateFailed("the backend no longer serves /app/v1")
         except EkeyAuthError as err:
-            raise UpdateFailed(f"not authorized: {err}") from err
+            # See the note above: a rejected token starts a reauth flow.
+            raise ConfigEntryAuthFailed(f"not authorized: {err}") from err
         except EkeyApiError as err:
             raise UpdateFailed(str(err)) from err
 

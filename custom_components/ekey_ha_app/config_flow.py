@@ -22,13 +22,11 @@ scanner rather than one page that has to say which it means.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -93,7 +91,7 @@ async def validate_input(hass: HomeAssistant, conn: EkeyConnection) -> dict[str,
             return {"title": f"ekey Scanner ({conn.scanner_id})"}
     except InvalidAuth:
         raise
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+    except (TimeoutError, aiohttp.ClientError) as err:
         _LOGGER.error("Cannot connect to ekey backend at %s - %s", conn.base_url, err)
         raise CannotConnect from err
 
@@ -245,7 +243,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> "EkeyOptionsFlow":
+    def async_get_options_flow(config_entry: ConfigEntry) -> EkeyOptionsFlow:
         """Return the options flow handler (serial port, and Wi-Fi on an ESP32)."""
         return EkeyOptionsFlow(config_entry)
 
@@ -694,10 +692,10 @@ class EkeyOptionsFlow(config_entries.OptionsFlow):
                             timeout=aiohttp.ClientTimeout(total=10),
                         ):
                             pass
-                    except (aiohttp.ClientError, asyncio.TimeoutError):
+                    except (TimeoutError, aiohttp.ClientError):
                         # Rebooting drops the connection before it can reply.
                         _LOGGER.info("Reboot request link dropped (expected)")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            except (TimeoutError, aiohttp.ClientError) as err:
                 _LOGGER.warning("Wi-Fi push to %s failed: %s", conn.base_url, err)
                 errors["base"] = "cannot_connect"
 
@@ -714,7 +712,7 @@ class EkeyOptionsFlow(config_entries.OptionsFlow):
             ) as resp:
                 if resp.status == 200:
                     prefill = await resp.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (TimeoutError, aiohttp.ClientError):
             pass
 
         schema = vol.Schema(
@@ -752,7 +750,7 @@ class EkeyOptionsFlow(config_entries.OptionsFlow):
                             errors["base"] = "invalid_auth"
                         elif resp.status != 200:
                             errors["base"] = "config_failed"
-                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                except (TimeoutError, aiohttp.ClientError) as err:
                     # The device reboots into setup mode and drops the link —
                     # a missing reply here is the expected success case.
                     _LOGGER.info("wifi-reset link dropped (expected on reboot): %s", err)
