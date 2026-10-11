@@ -13,8 +13,6 @@
   "documentation": "https://github.com/agrisvi/ekey_module_app",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/agrisvi/ekey_module_app/issues",
-  "requirements": [
-    "aiohttp>=3.8.0"
-  ],
+  "requirements": [],
   "version": "1.3.2"
 }
