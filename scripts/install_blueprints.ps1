@@ -56,7 +56,7 @@ New-Item -ItemType Directory -Path $AutoDest -Force | Out-Null
 # A loop rather than one Copy-Item per name, and a missing file is an ERROR. The
 # previous version copied a blueprint that did not exist
 # (door_unlock_on_match.yaml) and silently skipped one that did.
-$Blueprints = @("toggle_relay_on_granted.yaml", "welcome_notification.yaml", "access_notification_list.yaml")
+$Blueprints = @("toggle_relay_on_granted.yaml", "welcome_notification.yaml", "access_notification_list.yaml", "ekey_to_homematic.yaml", "ekey_to_homematicip_local.yaml")
 
 Write-Host ""
 Write-Host "Copying automation blueprints..."

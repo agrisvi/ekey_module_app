@@ -44,6 +44,8 @@ Destination: `config/blueprints/automation/ekey/`
 | `toggle_relay_on_granted.yaml` | Pulse an HA switch or relay when a known user is granted access |
 | `welcome_notification.yaml` | Push a notification naming the person, to any `notify.*` service |
 | `access_notification_list.yaml` | Add an entry to Home Assistant's own notification list (the bell), optionally including refusals |
+| `ekey_to_homematic.yaml` | Press a CCU virtual key, set a CCU system variable or a Homematic device value — through the core Homematic integration |
+| `ekey_to_homematicip_local.yaml` | The same through Homematic(IP) Local (HACS) |
 
 That list is kept in step with the actual files by
 `tests/ha_component/test_blueprints.py`, which reads the blueprint names back out of
@@ -64,11 +66,13 @@ config/
         └── ekey/          ← Create this folder
 ```
 
-### 2. Copy all three files into it
+### 2. Copy the files into it
 
 From `custom_components/ekey_ha_app/blueprints/` in your HA config directory:
-`toggle_relay_on_granted.yaml`, `welcome_notification.yaml` and
-`access_notification_list.yaml`.
+`toggle_relay_on_granted.yaml`, `welcome_notification.yaml`,
+`access_notification_list.yaml`, and whichever Homematic one matches your setup:
+`ekey_to_homematic.yaml` (core Homematic) or `ekey_to_homematicip_local.yaml`
+(Homematic(IP) Local).
 
 Pasting the YAML works just as well: **Settings** → **Automations & scenes** →
 **Blueprints** → **Import Blueprint**, paste the file contents, **Preview**,

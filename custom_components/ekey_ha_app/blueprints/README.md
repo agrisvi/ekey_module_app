@@ -1,8 +1,9 @@
 # ekey Home Assistant Blueprints
 
-Three automation blueprints. All three exist because they operate something that only
+Five automation blueprints. All of them exist because they operate something that only
 **Home Assistant** can operate — a switch entity, a notification service, its own
-notification list — which is the one thing the backend cannot do for you.
+notification list, a Homematic CCU it is connected to — which is the one thing the
+backend cannot do for you.
 
 Anything that only involves the scanner (LED feedback, KNX, MQTT, a webhook) should
 be an action on the backend instead, configured in the **Actions** and
@@ -110,12 +111,60 @@ Configurable:
 list, and is fine if that is all you want. Use this blueprint instead when you want one
 row that updates, or refusals recorded, or both.
 
+## ekey_to_homematic.yaml and ekey_to_homematicip_local.yaml
+
+Forward an access to a **Homematic CCU** (CCU3, RaspberryMatic, Homegear) through the
+Home Assistant integration you already use for it. Two files, one per integration —
+import the one that matches your setup:
+
+| File | For |
+| --- | --- |
+| `ekey_to_homematic.yaml` | the core [Homematic](https://www.home-assistant.io/integrations/homematic/) integration (`homematic`, YAML) |
+| `ekey_to_homematicip_local.yaml` | **Homematic(IP) Local** (`homematicip_local`, HACS) |
+
+Three things either can do on the CCU:
+
+| Action | Core `homematic` | Homematic(IP) Local | Use it for |
+| --- | --- | --- | --- |
+| **Press a virtual key** (recommended) | `homematic.virtualkey` | `homematicip_local.set_device_value`, `PRESS_SHORT`/`PRESS_LONG` on the key's channel | A CCU program "when virtual key *N* is pressed" — immediate, and the door logic stays on the CCU |
+| **Set a system variable** | `homematic.set_variable_value` | `homematicip_local.set_variable_value` | CCU programs that need to know *who* it was (write the person's name) or just *that* it happened |
+| **Set a device value** | `homematic.set_device_value` | `homematicip_local.set_device_value` | Switching a Homematic actuator straight from Home Assistant, e.g. `STATE` = `true` on a door opener |
+
+Configurable:
+
+- **When:** access granted (known user), denied, or either; optional comma-separated
+  person names; optional scanner
+- **Homematic:** which action and — core integration only — the interface name from
+  your `homematic:` configuration (e.g. `ip` for HmIP)
+- **Virtual key:** remote address (`BidCoS-RF`, keys 1–50; `HmIP-RCV-1`, keys 1–48),
+  key number, short or long press
+- **System variable:** the CCU hub entity (required with Homematic(IP) Local, optional
+  with one CCU on the core integration), the variable's name as on the CCU, and what to
+  write — the person, `granted`/`denied`, `true`, `false` or custom text
+- **Device value:** address, channel, parameter, value and value type
+
+Only the section for the chosen action is used. Runs queued, so several fingers in
+quick succession are each forwarded in order.
+
+> **Prepare the CCU first.** A virtual key does nothing until a CCU program uses it:
+> in the CCU WebUI create a program with the condition *"Virtual remote key N pressed
+> short"* (*Programme und Verknüpfungen → Programme*). A system variable has to exist
+> on the CCU, with the type matching what you write — a *character string* for the
+> person's name, a *logic value* for `true`/`false`.
+>
+> **A refusal carries no name.** An unrecognised finger belongs to nobody, so for
+> *denied* the person filter is skipped and "the person's name" writes an empty string.
+>
+> **This runs in Home Assistant**, so it stops while Home Assistant is down. For a door
+> that must open regardless, use an action on the scanner itself (Admin page →
+> **Actions** / **Automations**).
+
 ---
 
 ## How to install
 
 Home Assistant does not load a blueprint from `custom_components/`. It only reads
-`config/blueprints/automation/`, so these three files have to be *copied* there once,
+`config/blueprints/automation/`, so the files you want have to be *copied* there once,
 whichever method you use below.
 
 ### Method 1: copy and paste the YAML (works on every install)
@@ -130,7 +179,7 @@ The GitHub-URL field in that dialog cannot reach a blueprint stored under
 
 ### Method 2: manual file copy
 
-Copy the three `.yaml` files into `config/blueprints/automation/ekey/`, creating the
+Copy the `.yaml` files into `config/blueprints/automation/ekey/`, creating the
 folder if needed, then **Developer Tools** → **YAML** → **Reload Automations**. There
 is no `config/blueprints/script/ekey/` any more — nothing goes there.
 
@@ -145,7 +194,7 @@ The scripts live in `scripts/` at the root of the repository, **not inside the
 integration** — HACS installs `custom_components/ekey_ha_app/` and nothing else, so a
 HACS user does not have them and should use Method 1 or 2.
 
-Where they are available they copy all three files into
+Where they are available they copy every blueprint file into
 `config/blueprints/automation/ekey/`, stop with an error if any is missing — no silent
 half-installs — and list any other ekey blueprint they find elsewhere, because an
 automation created from one of those still uses that copy rather than the one just

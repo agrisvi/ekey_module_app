@@ -34,7 +34,9 @@ globalThis.customElements = {
   define(name, cls) { this._defined = cls; },
 };
 globalThis.document = {
-  createElement: () => ({}),
+  /* `style` and `append` because the scanner-page frame is built once in the shell. */
+  createElement: () => ({ style: {}, append() {} }),
+  cookie: "",
   addEventListener() {},
   removeEventListener() {},
 };
@@ -62,6 +64,10 @@ assert.ok(Panel, "the element registered itself");
 
 function panel(state) {
   const p = new Panel();
+  /* These tests are about Home Assistant's side of a scanner — users, persons,
+     enrolment. Selecting a scanner now opens its own page first, so ask for the
+     users view explicitly; the page view has tests of its own at the end. */
+  p._scannerView = "users";
   p._data = {
     users: [
       { id: "u1", username: "Test", fingers: [{ finger: 7, apid: "a".repeat(32) }] },
@@ -1102,6 +1108,114 @@ console.log("live subscription:");
     q._hass = fakeHass(async (cb, message) => { scoped = message; return () => {}; });
     await q._subscribe();
     check("scanner mode stays scoped", scoped && scoped.entry_id === "e1");
+  }
+}
+
+console.log("scanner page:");
+{
+  const DEVICE = {
+    entry_id: "dev", title: "ekey Scanner (fp-sensor.local:8080)", loaded: true,
+    page_url: "https://fp-sensor.local:8080/", page_addon: false, page_token: "t/k+1",
+  };
+  const ADDON = {
+    entry_id: "add", title: "ekey Scanner (127.0.0.1:8080)", loaded: true,
+    page_url: "", page_addon: true, page_token: "secret",
+  };
+  const page = (scanner, callWS) => {
+    const p = new Panel();
+    p._scanners = [scanner];
+    p._entryId = scanner.entry_id;
+    p._hass = { callWS: callWS || (async () => ({})) };
+    return p;
+  };
+
+  {
+    const p = page(DEVICE);
+    window.location = { protocol: "http:" };
+    await p._openPage();
+    delete window.location;
+    check("a device opens by its URL with the token in the fragment",
+      p._page.url === "https://fp-sensor.local:8080/#token=t%2Fk%2B1");
+    check("and offers the same address for a new tab", p._page.external === p._page.url);
+    check("the page view is the default", p._pageShown());
+    const head = p._renderHead();
+    check("the head names the scanner", head.includes("fp-sensor.local:8080"));
+    check("the head offers Home Assistant's side of it",
+      head.includes('id="view-toggle"') && head.includes("Users &amp; persons"));
+  }
+
+  {
+    const p = page(DEVICE);
+    window.location = { protocol: "https:" };
+    const plain = Object.assign({}, DEVICE, { page_url: "http://10.0.0.5:8080/" });
+    p._scanners = [plain];
+    await p._openPage();
+    delete window.location;
+    check("plain HTTP under an HTTPS Home Assistant is refused with a reason",
+      !p._page.url && /HTTPS/.test(p._page.error));
+    check("but still offers a new tab", p._page.external.startsWith("http://10.0.0.5:8080/"));
+    check("and the status card links to it",
+      p._renderPageStatus().includes('target="_blank"'));
+  }
+
+  {
+    const calls = [];
+    const p = page(ADDON, async (msg) => {
+      calls.push(msg.endpoint);
+      if (msg.endpoint === "/addons") {
+        return { addons: [{ slug: "core_x" }, { slug: "a1b2c3_ekey_ha_daemon" }] };
+      }
+      if (msg.endpoint === "/addons/a1b2c3_ekey_ha_daemon/info") {
+        return { state: "started", ingress_url: "/api/hassio_ingress/XYZ/" };
+      }
+      if (msg.endpoint === "/ingress/session") return { session: "S1" };
+      return {};
+    });
+    window.location = { protocol: "http:" };
+    await p._openPage();
+    check("the add-on opens through ingress", p._page.url === "/api/hassio_ingress/XYZ/");
+    check("never with its token", !p._page.url.includes("secret"));
+    check("the ingress session cookie is set for the ingress path",
+      document.cookie.includes("ingress_session=S1") &&
+      document.cookie.includes("path=/api/hassio_ingress/"));
+    check("the session is kept alive", p._ingressTimer !== null);
+    p._stopIngress();
+    check("and released when the view goes", p._ingressTimer === null);
+    delete window.location;
+  }
+
+  {
+    const p = page(ADDON, async (msg) => {
+      if (msg.endpoint === "/addons") return { addons: [{ slug: "local_ekey_ha_daemon" }] };
+      return { state: "stopped", ingress_url: "/api/hassio_ingress/XYZ/" };
+    });
+    await p._openPage();
+    check("a stopped add-on says so instead of framing an error page",
+      !p._page.url && /not running/.test(p._page.error));
+  }
+
+  {
+    const p = page(ADDON, async () => { throw new Error("unknown command"); });
+    await p._openPage();
+    check("without a Supervisor the reason is given",
+      !p._page.url && /Supervisor/.test(p._page.error));
+  }
+
+  {
+    const p = page(ADDON, async (msg) =>
+      msg.endpoint === "/addons" ? { addons: [{ slug: "core_mosquitto" }] } : {});
+    await p._openPage();
+    check("a loopback daemon that is not the add-on explains how to reach it",
+      !p._page.url && /-b 0\.0\.0\.0/.test(p._page.error));
+  }
+
+  {
+    const p = page(DEVICE);
+    p._scannerView = "users";
+    check("the users view does not show the page", !p._pageShown());
+    p._mode = "storage";
+    p._scannerView = "page";
+    check("storage mode does not show the page", !p._pageShown());
   }
 }
 

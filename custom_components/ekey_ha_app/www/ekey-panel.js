@@ -168,6 +168,16 @@ const STYLE = `
      body every time — so this one lives OUTSIDE it, as a sibling. */
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
              clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* The selected scanner's own page. Full width, unlike the cards: the backend's page
+     has its own layout and margins. Height leaves room for the head above it. */
+  .frame { padding: 0 16px 16px; }
+  .frame iframe { display: block; width: 100%; height: calc(100vh - 150px); min-height: 420px;
+                  border: 0; border-radius: var(--ha-card-border-radius, 12px);
+                  background: var(--card-background-color, #fff); }
+  a.btnlink { display: inline-block; padding: 8px 16px; border-radius: 4px; text-decoration: none;
+              font-size: 0.9rem; }
+  a.btnlink.ghost { color: var(--primary-color, #03a9f4); border: 1px solid var(--divider-color, #e0e0e0); }
 `;
 
 function esc(value) {
@@ -268,6 +278,16 @@ class EkeyPanel extends HTMLElement {
     this._formCache = {};         // id -> { value, start, end }
     this._lastDialogKey = null;   // so focus is taken once, not every render
     this._live = null;            // the persistent aria-live node
+
+    /* In scanner mode the panel shows the scanner's OWN page — the add-on through
+       ingress, a device or remote daemon by its URL — in place of a sidebar entry per
+       backend. "users" is Home Assistant's side of the same scanner: linking users to
+       persons, which no backend page can do. */
+    this._scannerView = "page";   // "page" | "users"
+    this._page = null;            // { entryId, url, external, loading, error }
+    this._frameSrc = "";          // what the iframe was last pointed at
+    this._ingressTimer = null;    // keeps the ingress session cookie valid
+    this._ingressSession = null;
   }
 
   /* HA assigns this on every render of the panel, so it must stay cheap: only
@@ -297,6 +317,7 @@ class EkeyPanel extends HTMLElement {
   disconnectedCallback() {
     document.removeEventListener("keydown", this._onKeyDown);
     this._teardown();
+    this._stopIngress();
   }
 
   /* Escape closes the picker, and deliberately does NOT abandon a live enrolment: the
@@ -338,6 +359,157 @@ class EkeyPanel extends HTMLElement {
 
   async _ws(message) {
     return this._hass.callWS(message);
+  }
+
+  // ---------------------------------------------------------- the scanner page
+
+  /* Resolve where the selected scanner's own page is and point the frame at it.
+     Guarded by entry id throughout: switching scanners while the Supervisor is still
+     answering must not land the previous scanner's page under the new title. */
+  async _openPage() {
+    this._stopIngress();
+    const scanner = this._scanners.find((s) => s.entry_id === this._entryId);
+    if (!scanner) {
+      this._page = null;
+      return;
+    }
+    const id = scanner.entry_id;
+    const fresh = () => this._page && this._page.entryId === id;
+    this._page = { entryId: id, url: "", external: "", loading: true, error: "" };
+    this._render();
+
+    /* The token rides in the URL FRAGMENT: a fragment is never sent to the server, so
+       it stays out of request lines and access logs. The page moves it into its own
+       sessionStorage and strips it from the address bar (log.html). */
+    const direct = scanner.page_url
+      ? scanner.page_url + (scanner.page_token
+        ? `#token=${encodeURIComponent(scanner.page_token)}` : "")
+      : "";
+    try {
+      let url;
+      if (scanner.page_addon) {
+        url = await this._ingressUrl();
+      } else if (!direct) {
+        throw new Error("This scanner has no address to open.");
+      } else if (window.location.protocol === "https:" && direct.startsWith("http:")) {
+        throw new Error("Home Assistant is served over HTTPS and this scanner over plain " +
+          "HTTP, so the browser refuses to show it inside this page.");
+      } else {
+        url = direct;
+      }
+      if (!fresh()) return;
+      this._page = { entryId: id, url, external: direct, loading: false, error: "" };
+    } catch (err) {
+      if (!fresh()) return;
+      this._page = {
+        entryId: id, url: "", external: direct, loading: false,
+        error: (err && err.message) || String(err),
+      };
+    }
+    this._render();
+  }
+
+  /* The add-on is framed through Supervisor ingress — the same mechanism as its
+     sidebar entry, which this replaces. Ingress needs an `ingress_session` cookie on
+     /api/hassio_ingress/, minted by the Supervisor and kept alive by validating it
+     regularly; that is exactly what Home Assistant's own ingress view does. */
+  async _ingressUrl() {
+    const sup = (endpoint, method, data) =>
+      this._ws(Object.assign({ type: "supervisor/api", endpoint, method }, data ? { data } : {}));
+    let list;
+    try {
+      list = await sup("/addons", "get");
+    } catch (err) {
+      throw new Error("This scanner is a daemon at 127.0.0.1, and there is no Supervisor " +
+        "to show an add-on through. 127.0.0.1 in a browser means the browser's own " +
+        "computer, so the page cannot be opened from here. Start the daemon with " +
+        "-b 0.0.0.0 and set this entry's host to the machine's network address.");
+    }
+    const addon = ((list && list.addons) || []).find((a) =>
+      a.slug === "ekey_ha_daemon" || String(a.slug || "").endsWith("_ekey_ha_daemon"));
+    if (!addon) {
+      throw new Error("This scanner is a daemon at 127.0.0.1, but the ekey module Daemon " +
+        "add-on is not installed, so it is a daemon running on this machine directly. " +
+        "127.0.0.1 in a browser means the browser's own computer, so its page cannot be " +
+        "opened from here. Start the daemon with -b 0.0.0.0 and set this entry's host to " +
+        "the machine's network address.");
+    }
+    const info = await sup(`/addons/${addon.slug}/info`, "get");
+    if (!info || !info.ingress_url) {
+      throw new Error("The ekey module Daemon add-on does not offer a web page (ingress).");
+    }
+    if (info.state !== "started") {
+      throw new Error("The ekey module Daemon add-on is not running. Start it under " +
+        "Settings → Add-ons.");
+    }
+    const created = await sup("/ingress/session", "post");
+    this._setIngressSession(created && created.session);
+    this._ingressTimer = setInterval(async () => {
+      try {
+        await sup("/ingress/validate_session", "post", { session: this._ingressSession });
+      } catch (err) {
+        try {
+          const again = await sup("/ingress/session", "post");
+          this._setIngressSession(again && again.session);
+        } catch (err2) {
+          /* The frame shows the Supervisor's own error on its next request; nothing
+             useful to add over it. */
+        }
+      }
+    }, 60000);
+    return info.ingress_url;
+  }
+
+  _setIngressSession(session) {
+    if (!session) throw new Error("The Supervisor did not open an ingress session.");
+    this._ingressSession = session;
+    document.cookie = `ingress_session=${session};path=/api/hassio_ingress/;SameSite=Strict` +
+      (window.location.protocol === "https:" ? ";Secure" : "");
+  }
+
+  _stopIngress() {
+    if (this._ingressTimer) {
+      clearInterval(this._ingressTimer);
+      this._ingressTimer = null;
+    }
+  }
+
+  _pageShown() {
+    return this._mode === "scanner" && this._scannerView === "page" &&
+      !!this._scanners.length;
+  }
+
+  /* The frame is a sibling of the re-rendered body, never inside it: _render()
+     replaces body.innerHTML on every event, and an iframe inside it would reload
+     the scanner page — logging it out and losing whatever was typed — each time. */
+  _syncFrame() {
+    if (!this._frameBox) return;
+    const page = this._page;
+    const url = this._pageShown() && page && page.entryId === this._entryId ? page.url : "";
+    this._frameBox.style.display = url ? "" : "none";
+    if (url !== this._frameSrc) {
+      this._frameSrc = url;
+      this._frame.src = url || "about:blank";
+    }
+  }
+
+  _renderPageStatus() {
+    const page = this._page;
+    if (!page || page.loading) {
+      return '<div class="card"><p class="empty">Opening the scanner page…</p></div>';
+    }
+    const link = page.external
+      ? `<div class="bar"><a class="ghost btnlink" href="${esc(page.external)}" target="_blank"
+           rel="noopener noreferrer">Open in a new tab</a></div>`
+      : "";
+    if (page.error) {
+      return `<div class="card"><h2>The scanner page cannot be shown here</h2>
+          <p class="hint">${esc(page.error)}</p>${link}</div>`;
+    }
+    /* Kept visible above a working frame too. A certificate the browser does not trust
+       fails INSIDE the frame, where this panel cannot see it — opening the address in a
+       tab is where the browser lets you inspect and accept it. */
+    return page.external ? link : "";
   }
 
   _say(text, kind) {
@@ -408,6 +580,8 @@ class EkeyPanel extends HTMLElement {
     this._data = null;
     this._storage = null;
     this._rememberSelection();
+    if (this._mode === "scanner") this._openPage();
+    else this._stopIngress();
     await this._subscribe();
     /* Opening a view is a question about the scanners, so ask them. Especially the
        storage view, whose entire content is a comparison between them. */
@@ -448,6 +622,7 @@ class EkeyPanel extends HTMLElement {
       this._say(`Could not read the scanner list: ${err.message || err}`, "err");
       return;
     }
+    if (this._mode === "scanner") this._openPage();
     await this._subscribe();
     await this._load({ refresh: true });
   }
@@ -617,8 +792,16 @@ class EkeyPanel extends HTMLElement {
       live.setAttribute("role", "status");
       live.setAttribute("aria-live", "polite");
     }
-    this.shadowRoot.append(style, body, live);
+    const frameBox = document.createElement("div");
+    frameBox.className = "frame";
+    frameBox.style.display = "none";
+    const frame = document.createElement("iframe");
+    if (frame.setAttribute) frame.setAttribute("title", "Scanner page");
+    frameBox.append(frame);
+    this.shadowRoot.append(style, body, frameBox, live);
     this._body = body;
+    this._frameBox = frameBox;
+    this._frame = frame;
     this._live = live;
     this._render();
   }
@@ -645,6 +828,10 @@ class EkeyPanel extends HTMLElement {
         parts.push('<div class="card"><p class="empty">Reading the database…</p></div>');
       }
       modal = this._renderStorageModal();
+    } else if (this._pageShown()) {
+      /* Before the not-loaded branch: a backend Home Assistant failed to load is often
+         still serving its page, and that page is where its problem is explained. */
+      parts.push(this._renderPageStatus());
     } else if (scanner && !scanner.loaded) {
       /* The serial port is named here on purpose: a wrong port is one of the two reasons
          a backend is unreachable (the other is the host/token), and this card is where
@@ -682,6 +869,7 @@ class EkeyPanel extends HTMLElement {
     this._wire();
     this._restoreForm();
     this._focusDialog();
+    this._syncFrame();
   }
 
   /* Text the operator is typing survives a re-render. Deliberately a short, named
@@ -767,11 +955,23 @@ class EkeyPanel extends HTMLElement {
     /* The title is the first of four signals that say which side you are looking at
        — the others are the tag, the banner card, and the tint on every card. A page
        that looks the same in both modes is this feature's main usability risk. */
+    const scanner = this._scanners.find((s) => s.entry_id === this._entryId) || {};
+    /* Scanner mode has two faces: the scanner's own page, and Home Assistant's side
+       of it (users linked to persons). One button switches, and says where it goes. */
+    const toggle = !storage && this._scanners.length
+      ? `<div class="bar" style="margin-top:8px"><button class="ghost" id="view-toggle"${
+          busy ? " disabled" : ""}>${this._scannerView === "page"
+          ? "Users &amp; persons in Home Assistant" : "Back to the scanner page"}</button></div>`
+      : "";
     const heading = storage
       ? `<h1>Fingerprint storage <span class="tag">Home Assistant</span></h1>
          <p class="sub">Home Assistant's own copy of every fingerprint template. Nothing here
            opens a door by itself — a scanner does that. Use it to repair a scanner, add a new
            one, or recover after a factory reset.</p>`
+      : this._scannerView === "page"
+      ? `<h1>${safe(scanner.title || "ekey scanner")}</h1>
+         <p class="sub">The scanner's own pages — access log, users, actions and settings —
+           opened here and already signed in.</p>`
       : `<h1>ekey users &amp; fingerprints</h1>
          <p class="sub">Managed on the scanner itself — Home Assistant is the front-end.
            Recognitions keep working when Home Assistant is down.</p>`;
@@ -779,6 +979,7 @@ class EkeyPanel extends HTMLElement {
         <div>
           ${heading}
           ${version ? `<p class="sub muted">Integration ${esc(version)}</p>` : ""}
+          ${toggle}
         </div>
         ${picker}
       </div>`;
@@ -1766,6 +1967,10 @@ class EkeyPanel extends HTMLElement {
     };
 
     on("scanner", "change", (ev) => this._selectMode(ev.target.value));
+    on("view-toggle", "click", () => {
+      this._scannerView = this._scannerView === "page" ? "users" : "page";
+      this._render();
+    });
 
     // ---- storage view -------------------------------------------------------
     on("goto-storage", "click", () => this._selectMode(STORAGE_ID));

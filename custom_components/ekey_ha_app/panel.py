@@ -60,6 +60,23 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         )
         return
 
+    # Claimed before the first await, for the same reason as _SERVICES_REGISTERED in
+    # __init__.py: two entries setting up concurrently would otherwise both get past
+    # the check above, and the second registration raises "Overwriting panel ekey".
+    domain_data[_REGISTERED] = True
+    try:
+        await _async_register(hass, domain_data, static_dir)
+    except Exception:
+        domain_data[_REGISTERED] = False
+        raise
+    _LOGGER.debug("Registered the ekey panel at /%s", PANEL_URL_PATH)
+
+
+async def _async_register(
+    hass: HomeAssistant, domain_data: dict, static_dir: Path
+) -> None:
+    """The awaiting part of async_register_panel(), run once the flag is claimed."""
+
     await hass.http.async_register_static_paths(
         [StaticPathConfig(PANEL_STATIC_PATH, str(static_dir), cache_headers=False)]
     )
@@ -89,9 +106,6 @@ async def async_register_panel(hass: HomeAssistant) -> None:
         # that into a glance instead of an investigation.
         config={"domain": DOMAIN, "version": version},
     )
-
-    domain_data[_REGISTERED] = True
-    _LOGGER.debug("Registered the ekey panel at /%s", PANEL_URL_PATH)
 
 
 def async_remove_panel(hass: HomeAssistant) -> None:

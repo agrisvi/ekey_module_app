@@ -71,8 +71,12 @@ used to need a dashboard full of helper entities:
 | Change which serial port the scanner is on | Settings → Devices & services → **Configure** — *not the panel, see below* |
 | Actions, automations, access log, MQTT, KNX | the backend's own **Admin** page |
 
-The backend token never reaches the browser: the panel talks to Home Assistant
-over the websocket connection it already has, and the integration holds the token.
+For users, fingerprints and storage the panel talks to Home Assistant over the
+websocket connection it already has, and the integration holds the token. The one
+exception is showing a scanner's own pages in the panel: an admin's browser then
+receives that entry's token (the same one its Configure dialog shows) to sign the page
+in — in the URL fragment, never sent to a server. The add-on's page goes through ingress
+and needs no token at all.
 
 Rules that must survive a Home Assistant restart — LED feedback, KNX, MQTT,
 webhooks — belong on the backend, not here. That is why they are configured on the

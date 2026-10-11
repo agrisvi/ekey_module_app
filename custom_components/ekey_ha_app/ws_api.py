@@ -26,6 +26,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SSL, CONF_TOKEN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import instance_id
 
@@ -202,6 +203,7 @@ async def ws_scanners(hass: HomeAssistant, connection, msg) -> None:
                     "loaded": False,
                     "app_api": False,
                     "capabilities": None,
+                    **scanner_page(entry.data),
                 }
             )
             continue
@@ -216,9 +218,41 @@ async def ws_scanners(hass: HomeAssistant, connection, msg) -> None:
                 "app_api": bool(data.get("app_api")),
                 "capabilities": data.get("capabilities"),
                 "available": coordinator.last_update_success,
+                **scanner_page(entry.data),
             }
         )
     connection.send_result(msg["id"], {"scanners": scanners})
+
+
+# Hosts that mean "the daemon on the Home Assistant machine itself". From the browser
+# they mean the BROWSER's machine, so such a backend is only reachable through the
+# add-on's ingress — never by its own URL.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def scanner_page(data: Any) -> dict[str, Any]:
+    """Where the panel finds a backend's own web page, and how to log in to it.
+
+    The panel shows the selected scanner's own page instead of a sidebar entry per
+    backend. A device or a daemon elsewhere on the network is framed by its URL, with
+    the stored token handed over so the page opens logged in. A loopback backend is
+    the add-on: the panel frames it through Supervisor ingress, where Home Assistant
+    has already authenticated the user and no token is needed.
+
+    The token goes to an admin's browser only (this command requires admin), and the
+    entry's Configure dialog already shows it there.
+    """
+    host = str(data.get(CONF_HOST) or "")
+    port = data.get(CONF_PORT)
+    ssl = bool(data.get(CONF_SSL))
+    addon = not ssl and host in _LOOPBACK_HOSTS
+    url_host = f"[{host}]" if ":" in host else host
+    return {
+        "page_url": "" if addon or not host else
+        f"{'https' if ssl else 'http'}://{url_host}:{port}/",
+        "page_addon": addon,
+        "page_token": data.get(CONF_TOKEN) or "",
+    }
 
 
 @websocket_api.websocket_command({vol.Required("type"): "ekey_ha_app/persons"})

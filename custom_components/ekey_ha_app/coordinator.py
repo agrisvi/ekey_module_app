@@ -130,8 +130,10 @@ class EkeyDataUpdateCoordinator(DataUpdateCoordinator):
 
         _LOGGER.debug("GET %s", url)
 
+        # no-cache: the scanner's own list, not an ekey device's RAM copy (see api.py _headers).
+        headers = {**self.conn.headers(), "Cache-Control": "no-cache"}
         try:
-            async with self.session.get(url, headers=self.conn.headers(), timeout=aiohttp.ClientTimeout(total=15)) as response:
+            async with self.session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
                 if response.status == 200:
                     try:
                         data = await response.json()

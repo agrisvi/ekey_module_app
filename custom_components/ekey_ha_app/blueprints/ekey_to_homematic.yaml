@@ -1,0 +1,313 @@
+# Forwards ekey access events to a Homematic CCU through the CORE Homematic integration
+# (`homematic`, configured in YAML — https://www.home-assistant.io/integrations/homematic/).
+# For the HACS integration Homematic(IP) Local use ekey_to_homematicip_local.yaml.
+#
+#   press a virtual key     homematic.virtualkey
+#   set a system variable   homematic.set_variable_value
+#   set a device value      homematic.set_device_value
+#
+# The virtual key is the recommended route: a press on the CCU's virtual remote
+# (BidCoS-RF, or HmIP-RCV-1 for the HmIP one) is a real Homematic event, so a CCU
+# program "when virtual key 5 is pressed short" reacts immediately and keeps the door
+# logic on the CCU.
+blueprint:
+  name: ekey - Homematic on access (core Homematic)
+  description: >
+    When the ekey scanner grants (or denies) access, press a virtual key on the
+    Homematic CCU, set a CCU system variable, or set a value on a Homematic device —
+    through the core **Homematic** integration (`homematic`, YAML). Using
+    Homematic(IP) Local from HACS instead? Import *ekey - Homematic on access
+    (Homematic(IP) Local)*.
+
+
+    A granted finger that maps to nobody in the user list is ignored. A refusal
+    carries no person, so the person filter does not apply to it.
+
+
+    Fill in only the section for the action you choose; the others are ignored.
+  domain: automation
+  input:
+    when_section:
+      name: When
+      icon: mdi:fingerprint
+      input:
+        access_result:
+          name: Access result
+          description: Which scanner result runs this automation.
+          default: granted
+          selector:
+            select:
+              options:
+                - label: Access granted (known user)
+                  value: granted
+                - label: Access denied
+                  value: denied
+                - label: Either
+                  value: any
+        person_filter:
+          name: Persons (optional)
+          description: >
+            Only for these people — names as the ekey panel shows them, comma-separated,
+            not case-sensitive. Leave empty for everyone.
+          default: ""
+          selector:
+            text:
+        scanner_sensor:
+          name: Scanner (optional)
+          description: >
+            Leave empty to react to every scanner. With more than one, pick that
+            scanner's "ekey Scanner Info" sensor.
+          default: ""
+          selector:
+            entity:
+              domain: sensor
+              integration: ekey_ha_app
+
+    homematic_section:
+      name: Homematic
+      icon: mdi:home-automation
+      input:
+        hm_action:
+          name: Action
+          default: virtual_key
+          selector:
+            select:
+              options:
+                - label: Press a virtual key on the CCU (recommended)
+                  value: virtual_key
+                - label: Set a CCU system variable
+                  value: system_variable
+                - label: Set a value on a Homematic device
+                  value: device_value
+        hm_interface:
+          name: Interface (optional)
+          description: >
+            The interface name from your `homematic:` configuration, e.g. `ip` for an
+            HmIP device or the HmIP virtual remote. Leave empty for the default.
+          default: ""
+          selector:
+            text:
+
+    virtual_key_section:
+      name: Virtual key
+      icon: mdi:gesture-tap-button
+      collapsed: true
+      input:
+        key_address:
+          name: Virtual remote address
+          description: >
+            `BidCoS-RF` for the classic virtual remote (keys 1–50), `HmIP-RCV-1` for
+            the HmIP one (keys 1–48, and set Interface above).
+          default: BidCoS-RF
+          selector:
+            text:
+        key_channel:
+          name: Key number
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 50
+              mode: box
+        key_param:
+          name: Press
+          default: PRESS_SHORT
+          selector:
+            select:
+              options:
+                - label: Short press
+                  value: PRESS_SHORT
+                - label: Long press
+                  value: PRESS_LONG
+
+    variable_section:
+      name: System variable
+      icon: mdi:variable
+      collapsed: true
+      input:
+        hub_entity:
+          name: CCU hub entity (optional)
+          description: >
+            The `homematic.<name>` entity of your CCU. Needed only with more than one
+            CCU configured.
+          default: ""
+          selector:
+            entity:
+              integration: homematic
+        variable_name:
+          name: System variable name
+          description: The variable's name exactly as it appears on the CCU.
+          default: ""
+          selector:
+            text:
+        variable_value:
+          name: Value to write
+          default: person
+          selector:
+            select:
+              options:
+                - label: The person's name (empty on a refusal)
+                  value: person
+                - label: The result — "granted" or "denied"
+                  value: result
+                - label: "true"
+                  value: "true"
+                - label: "false"
+                  value: "false"
+                - label: Custom text (below)
+                  value: custom
+        variable_custom:
+          name: Custom value
+          description: Written when "Value to write" is "Custom text".
+          default: ""
+          selector:
+            text:
+
+    device_section:
+      name: Device value
+      icon: mdi:tune-variant
+      collapsed: true
+      input:
+        device_address:
+          name: Device address
+          description: The device's serial/address on the CCU, e.g. `MEQ0123456`.
+          default: ""
+          selector:
+            text:
+        device_channel:
+          name: Channel
+          default: 1
+          selector:
+            number:
+              min: 0
+              max: 99
+              mode: box
+        device_parameter:
+          name: Parameter
+          description: e.g. `STATE` for a switch actuator, `LEVEL` for a dimmer.
+          default: STATE
+          selector:
+            text:
+        device_value:
+          name: Value
+          default: "true"
+          selector:
+            text:
+        device_value_type:
+          name: Value type
+          default: boolean
+          selector:
+            select:
+              options:
+                - boolean
+                - int
+                - double
+                - string
+
+# Several fingers in quick succession are each forwarded, in order.
+mode: queued
+max: 10
+
+variables:
+  hm_action: !input hm_action
+  result_filter: !input access_result
+  person_filter: !input person_filter
+  scanner: !input scanner_sensor
+  hm_interface: !input hm_interface
+  key_address: !input key_address
+  key_channel: !input key_channel
+  key_param: !input key_param
+  hub_entity: !input hub_entity
+  variable_name: !input variable_name
+  variable_value: !input variable_value
+  variable_custom: !input variable_custom
+  device_address: !input device_address
+  device_channel: !input device_channel
+  device_parameter: !input device_parameter
+  device_value: !input device_value
+  device_value_type: !input device_value_type
+  result: "{{ trigger.id }}"
+  person: "{{ trigger.event.data.person_name | default('', true) }}"
+  wanted_persons: >-
+    {{ person_filter.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
+  sysvar_value: >-
+    {% if variable_value == 'person' %}{{ person if result == 'granted' else '' }}
+    {%- elif variable_value == 'result' %}{{ result }}
+    {%- elif variable_value == 'true' %}{{ true }}
+    {%- elif variable_value == 'false' %}{{ false }}
+    {%- else %}{{ variable_custom }}{% endif %}
+
+trigger:
+  - platform: event
+    event_type: ekey_access_granted
+    id: granted
+  - platform: event
+    event_type: ekey_access_denied
+    id: denied
+
+condition:
+  - condition: template
+    value_template: "{{ result_filter == 'any' or result_filter == result }}"
+  # entity_id in the event is the scanner's own info sensor, filled in per scanner.
+  - condition: template
+    value_template: "{{ not scanner or trigger.event.data.entity_id == scanner }}"
+  # "Unknown" is what the integration reports for a fingerprint that maps to no user.
+  - condition: template
+    value_template: "{{ result != 'granted' or person not in ['', 'Unknown'] }}"
+  - condition: template
+    value_template: >-
+      {{ not wanted_persons or result != 'granted' or person | lower in wanted_persons }}
+
+action:
+  # `interface` and `entity_id` are optional in these actions and must be left out
+  # rather than sent empty, hence a branch with and one without.
+  - choose:
+      - conditions: "{{ hm_action == 'virtual_key' and not hm_interface }}"
+        sequence:
+          - service: homematic.virtualkey
+            data:
+              address: "{{ key_address }}"
+              channel: "{{ key_channel | int }}"
+              param: "{{ key_param }}"
+      - conditions: "{{ hm_action == 'virtual_key' and hm_interface }}"
+        sequence:
+          - service: homematic.virtualkey
+            data:
+              address: "{{ key_address }}"
+              channel: "{{ key_channel | int }}"
+              param: "{{ key_param }}"
+              interface: "{{ hm_interface }}"
+
+      - conditions: "{{ hm_action == 'system_variable' and not hub_entity }}"
+        sequence:
+          - service: homematic.set_variable_value
+            data:
+              name: "{{ variable_name }}"
+              value: "{{ sysvar_value }}"
+      - conditions: "{{ hm_action == 'system_variable' and hub_entity }}"
+        sequence:
+          - service: homematic.set_variable_value
+            data:
+              entity_id: "{{ hub_entity }}"
+              name: "{{ variable_name }}"
+              value: "{{ sysvar_value }}"
+
+      - conditions: "{{ hm_action == 'device_value' and not hm_interface }}"
+        sequence:
+          - service: homematic.set_device_value
+            data:
+              address: "{{ device_address }}"
+              channel: "{{ device_channel | int }}"
+              param: "{{ device_parameter }}"
+              value: "{{ device_value }}"
+              value_type: "{{ device_value_type }}"
+      - conditions: "{{ hm_action == 'device_value' and hm_interface }}"
+        sequence:
+          - service: homematic.set_device_value
+            data:
+              address: "{{ device_address }}"
+              channel: "{{ device_channel | int }}"
+              param: "{{ device_parameter }}"
+              value: "{{ device_value }}"
+              value_type: "{{ device_value_type }}"
+              interface: "{{ hm_interface }}"

@@ -64,6 +64,10 @@ _LOGGER = logging.getLogger(__name__)
 # Local mode nudges the user toward the loopback host; remote has no default.
 DEFAULT_LOCAL_HOST = "127.0.0.1"
 
+# Names an entry may use for the daemon on this host. The add-on announces itself
+# as 127.0.0.1; an entry typed in by hand often says localhost.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 # The serial-port step's fields. ``path`` matches what the backend's PUT body calls
 # it, so the form key and the wire name cannot drift apart.
 CONF_SERIAL_PATH = "path"
@@ -100,6 +104,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for ekey Home Assistant App."""
 
     VERSION = 2
+
+    _discovered: dict[str, Any]
+    _addon_name: str
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -188,6 +195,82 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title=info["title"], data=data)
 
         return self.async_show_form(step_id=step_id, data_schema=schema, errors=errors)
+
+    # ------------------------------------------------------- add-on discovery
+
+    async def async_step_hassio(self, discovery_info: Any) -> FlowResult:
+        """The ekey add-on announced itself through the Supervisor.
+
+        The add-on's API token lives in the add-on's own /data, which Home Assistant
+        Core cannot read — so it used to reach the integration only by an operator
+        copying the 'App API token' log line into a dialog. The add-on now posts
+        ``{host, port, token}`` to the Supervisor's discovery API on every start and
+        whenever the token is regenerated, and that lands here.
+
+        An entry for that daemon already existing is the common case, not an edge
+        case: it then only takes the token over and reloads, which is also how a
+        token regenerated on the System tab reaches the integration with nobody
+        pasting anything. Otherwise the operator is asked once to confirm, as Home
+        Assistant expects for anything discovered.
+
+        ``discovery_info`` is a ``HassioServiceInfo``; typed loosely because its
+        import path moved between Home Assistant releases this integration supports.
+        """
+        cfg = dict(getattr(discovery_info, "config", None) or {})
+        host = str(cfg.get(CONF_HOST) or DEFAULT_LOCAL_HOST)
+        try:
+            port = int(cfg.get(CONF_PORT) or DEFAULT_PORT)
+        except (TypeError, ValueError):
+            return self.async_abort(reason="invalid_discovery_info")
+        token = str(cfg.get(CONF_TOKEN) or "").strip() or None
+
+        # Matched on what reaches the same daemon, not on the unique id: an entry made
+        # by hand may say "localhost" where the add-on says "127.0.0.1", and those must
+        # not turn into two entries for one scanner.
+        same_host = _LOOPBACK_HOSTS | {host}
+        for entry in self._async_current_entries(include_ignore=False):
+            if entry.data.get(CONF_SSL):
+                continue
+            if entry.data.get(CONF_PORT) != port or entry.data.get(CONF_HOST) not in same_host:
+                continue
+            if token and entry.data.get(CONF_TOKEN) != token:
+                _LOGGER.info(
+                    "ekey add-on announced a new API token for %s:%s; updating the entry",
+                    host,
+                    port,
+                )
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={CONF_TOKEN: token}, reason="already_configured"
+                )
+            return self.async_abort(reason="already_configured")
+
+        await self.async_set_unique_id(f"{host}:{port}")
+        # Also what makes an "Ignore" on the discovery card stick across restarts.
+        self._abort_if_unique_id_configured()
+
+        self._discovered = {
+            CONF_HOST: host,
+            CONF_PORT: port,
+            CONF_SSL: False,
+            CONF_TOKEN: token,
+            CONF_VERIFY_SSL: False,
+        }
+        self._addon_name = str(getattr(discovery_info, "name", "") or "ekey module Daemon")
+        self.context["title_placeholders"] = {"name": self._addon_name}
+        return await self.async_step_hassio_confirm()
+
+    async def async_step_hassio_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm adding the discovered add-on. No fields: the token came with it."""
+        schema = vol.Schema({})
+        if user_input is None:
+            return self.async_show_form(
+                step_id="hassio_confirm",
+                data_schema=schema,
+                description_placeholders={"addon": self._addon_name},
+            )
+        return await self._async_finish(dict(self._discovered), "hassio_confirm", schema)
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Start a reauth flow — the stored token stopped being accepted.

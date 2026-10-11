@@ -1,6 +1,11 @@
 {
   "config": {
+    "flow_title": "{name}",
     "step": {
+      "hassio_confirm": {
+        "title": "ekey add-on found",
+        "description": "Connect Home Assistant to the scanner served by the {addon} add-on? The add-on supplied its API token, so there is nothing to paste. If the token is regenerated later, the add-on hands the new one over by itself."
+      },
       "user": {
         "title": "ekey module App",
         "description": "Choose how Home Assistant reaches the ekey backend.",
@@ -57,7 +62,8 @@
     },
     "abort": {
       "already_configured": "Device is already configured",
-      "reauth_successful": "The new token was accepted."
+      "reauth_successful": "The new token was accepted.",
+      "invalid_discovery_info": "The ekey add-on announced itself with a port that is not a number."
     }
   },
   "options": {

@@ -147,6 +147,11 @@ class EkeyAppClient:
         headers = dict(self._conn.headers())
         if json_body:
             headers["Content-Type"] = "application/json"
+        # An ekey device answers GET /api/v1/fingerprints and /api/v1/device from a short
+        # RAM cache, for its own web page. This integration's reads are the authoritative
+        # ones — the storage matrix, "missing on scanner", the check after a transfer — so
+        # they always ask the scanner itself. Ignored by backends without such a cache.
+        headers["Cache-Control"] = "no-cache"
         return headers
 
     @staticmethod

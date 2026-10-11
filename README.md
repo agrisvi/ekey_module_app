@@ -112,6 +112,13 @@ and that choice decides what it asks next:
 **Submit** validates the connection before the entry is saved, so a wrong host or a
 rejected token fails here rather than silently later.
 
+**With the ekey module Daemon add-on (1.3.2 or later) you do not need this dialog.** The
+add-on announces itself and its API token through the Supervisor, and Home Assistant
+shows **"ekey add-on found"** under Devices & Services — press **Submit**, there is no
+token field. An entry you already made for it (`127.0.0.1` or `localhost`, port 8080) is
+recognised and takes the token over instead; a token regenerated on the add-on's System
+tab reaches the entry the same way, within about ten seconds.
+
 Supply the **API token** even on a local install unless you have no use for the panel.
 It is optional for a local daemon's `/api/v1`, but required for user management: see
 the panel below.
@@ -148,17 +155,50 @@ configure at all says so.
 
 ## The ekey panel — users and fingerprints
 
-A sidebar entry named **ekey** (admin only) lists the users the *backend* holds, adds
-them, enrols a finger with live progress from the sensor, finds fingerprints the
-sensor holds that belong to nobody, and deletes with the sensor's confirmation.
+A sidebar entry named **ekey** (admin only). Its **Scanner or storage** list picks what
+it shows.
+
+### A scanner: its own pages
+
+Choosing a scanner opens **that scanner's own pages** — access log, users, actions,
+automations, settings — inside the panel, already signed in:
+
+| Backend | How it is shown | Sign-in |
+| --- | --- | --- |
+| ekey module Daemon **add-on** (`127.0.0.1`) | through Supervisor ingress | Home Assistant's own; no token involved. Replaces the add-on's "ekey daemon" sidebar entry |
+| **ESP32 device** | by its address, e.g. `https://fp-sensor.local:8080/` | the entry's stored token |
+| **daemon on another machine** | by its address, e.g. `http://192.168.10.50:8080/` | the entry's stored token |
+
+The token is handed to the page in the URL fragment (`#token=…`), which the browser
+never sends to a server, and the page removes it from the address at once. Automatic
+sign-in needs firmware/daemon 1.3.2; an older one shows its login form.
+
+When a page cannot be shown here, a card says why instead: the add-on is stopped; there
+is no Supervisor; Home Assistant is opened over HTTPS and the scanner speaks plain HTTP
+(the browser refuses to mix them — "Open in a new tab" still works); or a daemon at
+`127.0.0.1` that is **not** the add-on — `127.0.0.1` in a browser is the browser's own
+computer, so start that daemon with `-b 0.0.0.0` (plus `--require-token`) and give the
+entry the machine's network address. For a device whose self-signed certificate the
+browser has not accepted yet, "Open in a new tab" is where to accept it.
+
+### A scanner: users & persons in Home Assistant
+
+**Users & persons in Home Assistant**, next to the picker, switches to Home Assistant's
+side of the same scanner. It lists the users the *backend* holds, adds them, links each
+to a Home Assistant person, enrols a finger with live progress from the sensor, finds
+fingerprints the sensor holds that belong to nobody, and deletes with the sensor's
+confirmation.
 
 **The backend owns this, not Home Assistant.** User records and which finger slot owns
 which fingerprint live on the device or daemon, so a recognition still opens the door
 when Home Assistant is stopped. This integration is the front-end.
 
-The panel talks only to Home Assistant, over the websocket connection it already has;
-the integration holds the backend token and makes the calls. The token is never sent
-to the browser and neither backend needs CORS.
+This view talks only to Home Assistant, over the websocket connection it already has;
+the integration holds the backend token and makes the calls, and neither backend needs
+CORS. The one place a token reaches the browser is the scanner-page view above: an
+admin's browser (the panel is admin-only) receives the entry's token to sign the
+scanner's own page in — the same token the entry's **Configure → API token** dialog
+already shows that admin.
 
 ### What it needs from the backend
 

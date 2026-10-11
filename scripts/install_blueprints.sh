@@ -55,7 +55,7 @@ mkdir -p "$AUTO_DEST" || exit 1
 # A loop rather than one cp per name, and a missing file is an ERROR. The previous
 # version copied a blueprint that did not exist (door_unlock_on_match.yaml) and
 # silently skipped one that did, because each cp hid its own failure.
-BLUEPRINTS="toggle_relay_on_granted.yaml welcome_notification.yaml access_notification_list.yaml"
+BLUEPRINTS="toggle_relay_on_granted.yaml welcome_notification.yaml access_notification_list.yaml ekey_to_homematic.yaml ekey_to_homematicip_local.yaml"
 
 echo ""
 echo "Copying automation blueprints..."

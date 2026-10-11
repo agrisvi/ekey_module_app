@@ -758,12 +758,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # scanner #1's sensor entity, because these listeners were created inside the
     # "first entry only" block and captured that entry.
     if not hass.data[DOMAIN].get(_SERVICES_REGISTERED):
-        await async_setup_services(hass)
+        # Claimed BEFORE the first await. Home Assistant sets up the entries of one
+        # domain concurrently, so with two scanners (an ESP32 and the add-on, say)
+        # both used to pass this check while the first was still awaiting below —
+        # and the second then failed its whole setup on "Overwriting panel ekey".
+        # Released again if the domain-wide registration itself fails, so the next
+        # entry retries it instead of running without services or a panel.
+        hass.data[DOMAIN][_SERVICES_REGISTERED] = True
+        try:
+            await async_setup_services(hass)
 
-        # The panel and its websocket commands. Also once for the domain: there is
-        # one sidebar entry and it offers a scanner picker.
-        ws_api.async_register(hass)
-        await async_register_panel(hass)
+            # The panel and its websocket commands. Also once for the domain: there
+            # is one sidebar entry and it offers a scanner picker.
+            ws_api.async_register(hass)
+            await async_register_panel(hass)
+        except Exception:
+            hass.data[DOMAIN][_SERVICES_REGISTERED] = False
+            raise
 
         # The fingerprint database. Domain-level for the same reason the panel is:
         # it holds one template per finger for the whole fleet, and it is what lets
@@ -889,7 +900,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "- *Relay Pulse on Access Granted* — pulse an HA switch\n"
                 "- *Welcome Home Notification* — notify a phone\n"
                 "- *Access Notification List* — add to HA's own notification "
-                "list\n\n"
+                "list\n"
+                "- *Homematic on access* — press a CCU virtual key or set a CCU "
+                "variable; one blueprint for core Homematic, one for "
+                "Homematic(IP) Local\n\n"
                 "Home Assistant does not load blueprints from "
                 "`custom_components/`, so copy each one in: open the YAML in "
                 "`custom_components/ekey_ha_app/blueprints/` and paste it under "
@@ -910,8 +924,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             await _setup_store.async_save({"shown": True})
-
-        hass.data[DOMAIN][_SERVICES_REGISTERED] = True
 
     # A startup scan for fingerprints that belong to nobody used to live here. It
     # was already dead code — the line that scheduled it had been commented out —
