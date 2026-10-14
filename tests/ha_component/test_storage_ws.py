@@ -797,6 +797,29 @@ async def test_a_purge_confirmation_must_name_the_fingerprint(monkeypatch):
     assert started == [REAL_APID_A]
 
 
+async def test_a_user_purge_confirmation_must_name_the_user(monkeypatch):
+    hass, _, _, vault = build()
+    await stock(vault)
+    started = []
+
+    async def fake(key, username=None):
+        started.append(key)
+        return {"job_id": "j"}
+
+    monkeypatch.setattr(async_get_jobs(hass), "async_purge_user", fake)
+
+    conn = Connection()
+    await call(hass, ws_api.ws_storage_purge_user, conn,
+               {"id": 1, "key": "name:master", "confirm": "name:someone"})
+    assert conn.errors and conn.errors[0][0] == ws_api.ERR_INVALID
+    assert started == [], "and no job was started"
+
+    conn = Connection()
+    await call(hass, ws_api.ws_storage_purge_user, conn,
+               {"id": 2, "key": "name:master", "confirm": "name:master"})
+    assert started == ["name:master"]
+
+
 async def test_purging_is_admin_only():
     from homeassistant.exceptions import Unauthorized
 

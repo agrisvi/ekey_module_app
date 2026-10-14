@@ -47,7 +47,7 @@ from .api import (
     EkeyNotFoundError,
     EkeyTemplateRejected,
 )
-from .const import APP_HTTP_BODY_MAX, DOMAIN, EVENT_VAULT_JOB
+from .const import APP_HTTP_BODY_MAX, DOMAIN, EVENT_USERS_CHANGED, EVENT_VAULT_JOB
 
 # One-way on purpose: enroll.py reaches back for async_capture_enrolled through a
 # deferred import inside the function that needs it, so this stays acyclic.
@@ -152,6 +152,9 @@ class VaultJob:
     cancelled: bool = False
     cancelling: bool = False
     started_at: float = field(default_factory=time.time)
+    # What a purge deletes (person key / APID), so the panel's Retry re-runs the delete
+    # instead of falling through to a push — which would put it back.
+    target: str | None = None
 
     @property
     def counts(self) -> dict[str, int]:
@@ -177,6 +180,7 @@ class VaultJob:
             "entry_id": None,
             "job_id": self.job_id,
             "kind": self.kind,
+            "target": self.target,
             "title": self.title,
             "phase": self.phase,
             "index": len(self.items),
@@ -369,6 +373,43 @@ def _find_user(users: list[dict[str, Any]], person_key: str, username: str | Non
         if str(user.get("username", "")).strip().casefold() == wanted:
             return user
     return None
+
+
+def _assign_in_users(users: list[dict[str, Any]], record: dict[str, Any], apid: str) -> None:
+    """Put one database record's fingerprint into a scanner's user list, in place.
+
+    The record's person gets the APID in its finger slot — created if the scanner has
+    no such user yet — and whatever held that slot, or that APID, before is replaced.
+    Applied once per fingerprint to ONE list that is then written once, so a user
+    created for the first fingerprint is found again by the next.
+    """
+    person_key = record.get("person_key") or ""
+    username = record.get("username")
+
+    user = _find_user(users, person_key, username)
+    if user is None:
+        user = {
+            "id": str(uuid.uuid4()),
+            "username": username or person_key.removeprefix(vault_mod.NAME_KEY_PREFIX),
+            "fingers": [],
+        }
+        if vault_mod.is_person_link(person_key):
+            user["ha_person"] = person_key
+        users.append(user)
+
+    finger = record.get("finger")
+    fingers = [
+        f
+        for f in (user.get("fingers") or [])
+        if isinstance(f, dict)
+        and str(f.get("apid", "")).lower() != apid
+        and f.get("finger") != finger
+    ]
+    entry: dict[str, Any] = {"apid": apid, "enrolled_at": int(time.time())}
+    if isinstance(finger, int) and 1 <= finger <= MAX_FINGER:
+        entry["finger"] = finger
+    fingers.append(entry)
+    user["fingers"] = sorted(fingers, key=lambda f: f.get("finger") or 0)
 
 
 class VaultJobManager:
@@ -657,11 +698,34 @@ class VaultJobManager:
     ) -> None:
         job.phase = "running"
 
+        # One scanner at a time: every template first, then that scanner's user list
+        # ONCE. Assigning after each template cost four more requests per fingerprint —
+        # read the list, write it back, and re-read both the list and the fingerprint
+        # list for the snapshot, the last a full RS-485 round trip — none of which the
+        # next template needs. Order within a scanner is the order of `work`.
+        by_scanner: dict[str, tuple[ScannerRef, list[tuple[str, dict[str, Any]]]]] = {}
         for apid, record, ref in work:
-            if job.cancelling:
-                job.cancelled = True
+            by_scanner.setdefault(ref.entry_id, (ref, []))[1].append((apid, record))
+
+        index = 0
+        for ref, pairs in by_scanner.values():
+            written: list[tuple[str, dict[str, Any], JobItem]] = []
+            try:
+                for apid, record in pairs:
+                    if job.cancelling:
+                        job.cancelled = True
+                        break
+                    index += 1
+                    item = await self._write_template(job, apid, record, ref, index)
+                    if item is not None:
+                        written.append((apid, record, item))
+            finally:
+                # Also after a cancel: a template that is on the sensor opens the door,
+                # so it gets its owner even when the rest of the job was stopped.
+                if written:
+                    await self._assign_written(job, ref, written)
+            if job.cancelled:
                 break
-            await self._push_one(job, apid, record, ref)
 
         counts = job.counts
         if job.cancelled:
@@ -685,11 +749,26 @@ class VaultJobManager:
         fingerprint copied automatically after an enrollment lands under exactly the
         same checks, the same verification and the same reporting as one copied by
         hand. A second implementation of this is a second set of rules about when a
-        door is considered to have a fingerprint.
+        door is considered to have a fingerprint. The push itself batches the
+        assignment per scanner (_run_push); this is the same two steps for one.
+        """
+        item = await self._write_template(job, apid, record, ref, len(job.items) + 1)
+        if item is not None:
+            await self._assign_written(job, ref, [(apid, record, item)])
+
+    async def _write_template(
+        self, job: VaultJob, apid: str, record: dict[str, Any], ref: ScannerRef,
+        index: int,
+    ) -> JobItem | None:
+        """Write one template to one scanner and record the result.
+
+        Returns the recorded item when the template is on the sensor (state OK, which
+        :meth:`_assign_written` revises if the user list cannot follow), or None when
+        it was skipped or failed — then there is nothing to assign.
         """
         label = f"{record.get('username') or 'unknown'} · finger {record.get('finger')}"
         job.message = (
-            f"Writing {len(job.items) + 1} of {job.total} — {label} "
+            f"Writing {index} of {job.total} — {label} "
             f"to “{ref.title}”"
         )
         self._emit(job)
@@ -729,75 +808,60 @@ class VaultJobManager:
             return
         remember_template_api(self.hass, ref.entry_id, True)
 
-        # The template is on the sensor now. Everything below is the assignment,
-        # and its failure is reported as template_only rather than as a failed
-        # write, because retrying the write would be pointless and the operator
-        # needs to know the finger already opens that door.
-        try:
-            await self._async_assign(ref, record, apid)
-        except ValueError as err:
-            self._record(job, JobItem(
-                apid=apid, label=label, state=STATE_FAILED,
-                reason=REASON_USERS_DOC_TOO_LARGE, scanner=ref.title,
-                entry_id=ref.entry_id, detail=str(err),
-            ))
-            return
-        except EkeyApiError as err:
-            self._record(job, JobItem(
-                apid=apid, label=label, state=STATE_FAILED,
-                reason=REASON_TEMPLATE_ONLY, scanner=ref.title,
-                entry_id=ref.entry_id,
-                detail=(
-                    "the template is on the scanner and works, but its user list "
-                    f"could not be updated, so nobody is named for it: {err}"
-                ),
-            ))
-            return
-
-        self._record(job, JobItem(
+        # The template is on the sensor now. Recorded as OK at once so the progress
+        # moves; the assignment that follows (per scanner, _assign_written) revises it
+        # if the user list cannot be updated.
+        item = JobItem(
             apid=apid, label=label, state=STATE_OK, scanner=ref.title,
             entry_id=ref.entry_id, detail="stored and verified",
-        ))
+        )
+        self._record(job, item)
+        return item
 
-    async def _async_assign(
-        self, ref: ScannerRef, record: dict[str, Any], apid: str
+    async def _assign_written(
+        self, job: VaultJob, ref: ScannerRef,
+        written: list[tuple[str, dict[str, Any], JobItem]],
     ) -> None:
-        """Give the freshly written template an owner in that scanner's user list.
+        """Assign every template just written to one scanner — one user-list write.
+
+        A failure here is reported as template_only rather than as a failed write,
+        because retrying the write would be pointless and the operator needs to know
+        the finger already opens that door.
+        """
+        try:
+            await self._async_assign_many(ref, [(apid, record) for apid, record, _ in written])
+        except ValueError as err:
+            for _, _, item in written:
+                item.state = STATE_FAILED
+                item.reason = REASON_USERS_DOC_TOO_LARGE
+                item.detail = str(err)
+            self._emit(job, written[-1][2])
+        except EkeyApiError as err:
+            for _, _, item in written:
+                item.state = STATE_FAILED
+                item.reason = REASON_TEMPLATE_ONLY
+                item.detail = (
+                    "the template is on the scanner and works, but its user list "
+                    f"could not be updated, so nobody is named for it: {err}"
+                )
+            self._emit(job, written[-1][2])
+
+    async def _async_assign_many(
+        self, ref: ScannerRef, pairs: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Give freshly written templates an owner in that scanner's user list.
 
         Without this the scanner recognises the finger and reports an APID nobody
         claims — the door opens, but only Home Assistant can say who walked through
         it. Writing it means the scanner stays self-sufficient when HA is down,
         which is the property this integration advertises.
+
+        One read, one write and one snapshot refresh for all of them, however many.
         """
         users = await ref.client.async_get_users()
         before = len(users)
-        person_key = record.get("person_key") or ""
-        username = record.get("username")
-
-        user = _find_user(users, person_key, username)
-        if user is None:
-            user = {
-                "id": str(uuid.uuid4()),
-                "username": username or person_key.removeprefix(vault_mod.NAME_KEY_PREFIX),
-                "fingers": [],
-            }
-            if vault_mod.is_person_link(person_key):
-                user["ha_person"] = person_key
-            users.append(user)
-
-        finger = record.get("finger")
-        fingers = [
-            f
-            for f in (user.get("fingers") or [])
-            if isinstance(f, dict)
-            and str(f.get("apid", "")).lower() != apid
-            and f.get("finger") != finger
-        ]
-        entry: dict[str, Any] = {"apid": apid, "enrolled_at": int(time.time())}
-        if isinstance(finger, int) and 1 <= finger <= MAX_FINGER:
-            entry["finger"] = finger
-        fingers.append(entry)
-        user["fingers"] = sorted(fingers, key=lambda f: f.get("finger") or 0)
+        for apid, record in pairs:
+            _assign_in_users(users, record, apid)
 
         # The backend replaces the WHOLE document on a PUT and caps the body, so a
         # document that has outgrown the limit must be refused here — discovering
@@ -821,7 +885,7 @@ class VaultJobManager:
     async def _async_unassign(self, ref: ScannerRef, apid: str) -> bool:
         """Take one APID out of a scanner's user list. Returns whether it changed.
 
-        The mirror of :meth:`_async_assign`, and the second half of a delete: a
+        The mirror of :meth:`_async_assign_many`, and the second half of a delete: a
         template removed from the sensor while its finger entry stays in the
         document leaves a user apparently holding a fingerprint that no longer
         exists — the reverse of the unassigned-template problem, and just as
@@ -1100,6 +1164,7 @@ class VaultJobManager:
                 f"Deleting {label} from {len(refs)} scanner(s) and the database",
                 len(refs) + 1,          # +1: the database record itself
             )
+            job.target = apid
         finally:
             self._release()
         self._spawn(job, lambda j: self._run_purge(j, apid, label, refs))
@@ -1202,6 +1267,191 @@ class VaultJobManager:
             job,
             "Not deleted everywhere, so the database record was kept. The chips show "
             "which scanners still hold it; running this again is safe.",
+        )
+
+    # ------------------------------------------------------------ purge a user
+
+    async def async_purge_user(self, key: str, username: str | None = None) -> dict[str, Any]:
+        """Delete one person — every fingerprint and the user itself — everywhere.
+
+        The single-finger purge, widened to a person: on each scanner the person's
+        templates are deleted and the list re-read, and the user entry is removed only
+        once nothing of theirs is left there. The database records go last, and only
+        when every scanner confirmed. ``key`` is the database person key
+        (:func:`~.vault.person_key`); ``username`` names a person the database has
+        never seen (a user that only exists on scanners).
+        """
+        self._reserve()
+        try:
+            await async_refresh_scanners(self.hass)
+            await self.vault.async_load()
+
+            records = self.vault.data.get("records") or {}
+            db_apids = {a for a, r in records.items() if r.get("person_key") == key}
+            person = (self.vault.data.get("people") or {}).get(key) or {}
+            name = (
+                person.get("name")
+                or username
+                or key.removeprefix(vault_mod.NAME_KEY_PREFIX)
+            )
+            refs = scanner_refs(self.hass)
+            job = self._begin(
+                "purge_user",
+                f"Deleting {name} from {len(refs)} scanner(s) and the database",
+                len(refs) + 1,          # +1: the database records
+            )
+            job.target = key
+        finally:
+            self._release()
+        self._spawn(job, lambda j: self._run_purge_user(j, key, name, db_apids, refs))
+        return job.as_dict()
+
+    @staticmethod
+    def _users_of(users: list[dict[str, Any]], key: str, db_apids: set[str]) -> list[dict[str, Any]]:
+        """The users on one scanner that ARE this person.
+
+        Stricter than :func:`_find_user`, because this one deletes. A linked person is
+        matched on the link only — never on the name, which a different, unlinked user
+        may share. Anyone holding one of the person's fingerprints is that person too,
+        whatever this scanner calls them: that is what catches a copy pushed under a
+        different name, or a user nobody linked here.
+        """
+        wanted = key.removeprefix(vault_mod.NAME_KEY_PREFIX)
+        matched = []
+        for user in users:
+            apids = {
+                str(f.get("apid", "")).lower()
+                for f in (user.get("fingers") or []) if isinstance(f, dict)
+            }
+            if apids & db_apids:
+                matched.append(user)
+            elif vault_mod.is_person_link(key):
+                if user.get("ha_person") == key:
+                    matched.append(user)
+            elif (not user.get("ha_person")      # a linked namesake is someone else
+                  and str(user.get("username", "")).strip().casefold() == wanted):
+                matched.append(user)
+        return matched
+
+    async def _run_purge_user(
+        self, job: VaultJob, key: str, name: str, db_apids: set[str], refs: list[ScannerRef]
+    ) -> None:
+        job.phase = "running"
+        confirmed_gone = True
+
+        for ref in refs:
+            if job.cancelling:
+                job.cancelled = True
+                confirmed_gone = False
+                break
+
+            job.message = f"Deleting {name} from “{ref.title}”…"
+            self._emit(job)
+
+            if not ref.list_known:
+                confirmed_gone = False
+                self._record(job, JobItem(
+                    apid="", label=name, state=STATE_FAILED,
+                    reason=REASON_LIST_UNKNOWN, scanner=ref.title, entry_id=ref.entry_id,
+                    detail=(
+                        f"“{ref.title}” could not be asked what it holds, so this "
+                        "delete cannot be confirmed there"
+                    ),
+                ))
+                continue
+
+            try:
+                users = await ref.client.async_get_users()
+                mine = self._users_of(users, key, db_apids)
+                apids = set(db_apids)
+                for user in mine:
+                    apids |= {
+                        str(f.get("apid", "")).lower()
+                        for f in (user.get("fingers") or [])
+                        if isinstance(f, dict) and f.get("apid")
+                    }
+
+                held = sorted(a for a in apids if a in ref.on_scanner)
+                for apid in held:
+                    await ref.client.async_delete_fingerprint(apid)
+                survivors: list[str] = []
+                if held:
+                    # Re-read rather than trust the replies, as the single purge does.
+                    remaining = {str(a).lower() for a in await ref.client.async_list_fingerprints()}
+                    survivors = [a for a in held if a in remaining]
+                if survivors:
+                    confirmed_gone = False
+                    self._record(job, JobItem(
+                        apid=survivors[0], label=name, state=STATE_FAILED,
+                        reason=REASON_STILL_PRESENT, scanner=ref.title,
+                        entry_id=ref.entry_id,
+                        detail=(
+                            f"“{ref.title}” still lists {len(survivors)} of {len(held)} "
+                            "fingerprint(s) after the delete — the user was kept there"
+                        ),
+                    ))
+                    continue
+
+                # Nothing of theirs is left on the sensor: the user entry can go. Re-read
+                # first — the deletes above took seconds, and the document is replaced
+                # whole, so a stale copy would undo whatever changed meanwhile.
+                removed = 0
+                if mine:
+                    ids = {u.get("id") for u in mine}
+                    users = await ref.client.async_get_users()
+                    kept = [u for u in users if u.get("id") not in ids]
+                    removed = len(users) - len(kept)
+                    if removed:
+                        await ref.client.async_put_users(kept)
+                        self.hass.bus.async_fire(
+                            EVENT_USERS_CHANGED,
+                            {"entry_id": ref.entry_id, "reason": "user_deleted"},
+                        )
+            except Exception as err:  # noqa: BLE001 — classified below
+                confirmed_gone = False
+                state, reason = _classify(err)
+                self._record(job, JobItem(
+                    apid="", label=name, state=STATE_FAILED, reason=reason,
+                    scanner=ref.title, entry_id=ref.entry_id, detail=str(err),
+                ))
+                continue
+
+            if ref.app_coordinator is not None:
+                with contextlib.suppress(Exception):
+                    await ref.app_coordinator.async_refresh_now()
+
+            parts = []
+            parts.append(f"{len(held)} fingerprint(s) deleted and confirmed gone"
+                         if held else "no fingerprints of theirs on this scanner")
+            parts.append("user removed" if removed else "no user entry here")
+            self._record(job, JobItem(
+                apid="", label=name, state=STATE_OK, scanner=ref.title,
+                entry_id=ref.entry_id, detail=", ".join(parts),
+            ))
+
+        if confirmed_gone:
+            for apid in sorted(db_apids):
+                await self.vault.async_drop(apid)
+            self._record(job, JobItem(
+                apid="", label=name, state=STATE_OK, scanner=None,
+                detail=(f"{len(db_apids)} record(s) removed from the database"
+                        if db_apids else "nothing of theirs was in the database"),
+            ))
+            self._finish(job, f"{name} is gone from every scanner and the database.")
+            return
+
+        self._record(job, JobItem(
+            apid="", label=name, state=STATE_SKIPPED, scanner=None,
+            reason=REASON_STILL_PRESENT,
+            detail=(
+                "kept — a scanner still holds one of their fingerprints, or could not "
+                "confirm they are gone"
+            ),
+        ))
+        self._finish(
+            job,
+            "Not deleted everywhere, so the database records were kept. Scanners that "
+            "confirmed are already clean; running this again is safe.",
         )
 
 

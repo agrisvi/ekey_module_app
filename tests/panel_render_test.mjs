@@ -401,7 +401,9 @@ console.log("storage mode versus scanner mode:");
   p._renderShell();
   const html = p._body.innerHTML;
   check("the banner says it is the database", html.includes("not a scanner"));
-  check("the body is tinted via one class", p._body.className === "wrap storage");
+  check("the body is styled like the scanner page", p._body.className === "wrap");
+  check("with the scanner page's card title", html.includes("Users &amp; fingerprints"));
+  check("and a way back to the scanner page", html.includes('id="storage-back"'));
   check("no Add user card in storage mode", !html.includes('id="add-user"'));
   check("the storage tools are present",
     html.includes('id="storage-sync"') && html.includes('id="storage-backup"')
@@ -863,13 +865,13 @@ console.log("refresh asks the scanners:");
                    record_count: 0, user_count: 0, bytes: 0, job: null };
     const pending = p._refresh();
     check("the button says what it is doing",
-      p._renderStorageTools().includes("Asking the scanners…"));
+      p._renderStorageUsers().includes("Asking the scanners…"));
     check("and cannot be pressed twice",
-      /id="storage-refresh" disabled/.test(p._renderStorageTools()));
+      /id="storage-refresh" disabled/.test(p._renderStorageUsers()));
     inFlight({ records: [], users: [], scanners: [], extras: [], record_count: 0,
                user_count: 0, bytes: 0, job: null });
     await pending;
-    check("and goes back to Refresh", p._renderStorageTools().includes(">Refresh<"));
+    check("and goes back to Refresh", p._renderStorageUsers().includes(">Refresh<"));
   }
 
   {
@@ -932,7 +934,7 @@ console.log("enrolling from the database:");
     check("and says so", html.includes("Starting…"));
   }
 
-  check("the storage view offers it", storagePanel({})._renderStorageTools()
+  check("the storage view offers it", storagePanel({})._renderStorageUsers()
     .includes('id="storage-enroll"'));
 }
 

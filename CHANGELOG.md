@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.3
+
+- **Copying fingerprints to a scanner is faster.** A push used to update the scanner's
+  user list after every single template — read it, write it back, then re-read the list
+  and the scanner's fingerprint list for Home Assistant's snapshot (the last one a full
+  RS-485 round trip). Now every template for a scanner goes first, each still verified on
+  its own, and that scanner's user list is read and written once, with one refresh: for
+  N fingerprints N+4 requests instead of 5·N. If that one user-list write fails, every
+  fingerprint of the batch is reported as "template only" (on the sensor, nobody named),
+  as a single one was before; a cancelled push still assigns the templates it wrote.
+  (`jobs.py`)
+- **The ekey panel opens on "Fingerprint storage".** Whatever view was left last time, the
+  tab now starts on the storage overview; the last scanner stays remembered for the
+  scanner page. (`www/ekey-panel.js`)
+- **Delete a user on every scanner.** The storage view's user rows have **"Delete on every
+  scanner…"**: on each scanner every fingerprint of that person is deleted and the list
+  re-read, and the user entry goes only once nothing of theirs is left there; the
+  database records are removed last, and only when every scanner confirmed. A scanner
+  whose list cannot be read is reported, never assumed empty. (`jobs.py`
+  `async_purge_user`, websocket `ekey_ha_app/storage/purge_user`)
+- **The storage view reads like the scanner page.** Users fold their finger rows (arrow
+  per user, **Show all / Hide all**), the users card has the same button bar — Enroll
+  fingerprint…, Refresh, Sync from a scanner…, Push missing — and **"Back to the scanner
+  page"** returns to the last scanner. (`www/ekey-panel.js`)
+
 ## 1.3.2
 
 - **One version number with the backends.** The integration now carries the same number

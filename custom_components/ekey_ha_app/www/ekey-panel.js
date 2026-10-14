@@ -52,6 +52,11 @@ const STYLE = `
   :host { display: block; }
   .wrap { max-width: 1000px; margin: 0 auto; padding: 16px; }
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  /* The text shrinks and wraps; the picker keeps its place on the right. Without a basis
+     a long subtitle (the storage one) claimed the whole row and pushed the picker under it.
+     It still drops below on a narrow screen, where both cannot fit side by side. */
+  .head > :first-child { flex: 1 1 320px; min-width: 0; }
+  .head > :last-child:not(:first-child) { flex: 0 0 auto; }
   h1 { font-size: 1.5rem; margin: 0 0 4px; color: var(--primary-text-color); font-weight: 500; }
   .sub { color: var(--secondary-text-color); font-size: 0.9rem; margin: 0; }
   .card {
@@ -81,6 +86,13 @@ const STYLE = `
   .item { border: 1px solid var(--divider-color, #e0e0e0); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
   .item .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .name { font-weight: 500; }
+  .who { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+  .count { color: var(--secondary-text-color); font-size: 0.8rem; margin-left: 8px; }
+  button.fold { background: transparent; color: var(--primary-text-color); padding: 4px; line-height: 0; }
+  button.fold:hover { background: var(--secondary-background-color, rgba(0,0,0,.06)); }
+  button.fold svg { width: 16px; height: 16px; transition: transform .15s; }
+  button.fold[aria-expanded="true"] svg { transform: rotate(90deg); }
+  .fingers[hidden] { display: none; }
   .person { color: var(--secondary-text-color); font-size: 0.8rem; }
   .finger { display: flex; justify-content: space-between; align-items: center; gap: 8px;
             padding: 6px 0; border-top: 1px solid var(--divider-color, #e0e0e0); margin-top: 8px; flex-wrap: wrap; }
@@ -151,13 +163,10 @@ const STYLE = `
   .legend .chip { margin: 0 2px; }
   @media (max-width: 600px) { .chips { justify-content: flex-start; } }
 
-  /* Storage mode is tinted, so a page showing the DATABASE cannot be mistaken at a
-     glance for one showing a scanner. That confusion is this feature's main
-     usability risk, so it is answered in four places at once — see _renderHead. */
-  .storage .card { border-left: 4px solid var(--info-color, #03a9f4); }
-  .banner { background: rgba(3,169,244,.08); }
-  .tag { font-size: 0.7rem; vertical-align: middle; padding: 2px 8px; border-radius: 999px;
-         background: rgba(3,169,244,.16); color: var(--info-color, #03a9f4); font-weight: 500; }
+  /* Storage mode used to be tinted (a stripe on every card, a banner card, a tag) so the
+     DATABASE could not be mistaken for a scanner. It now shares the scanner page's design
+     on purpose: the title, the subtitle and the scanner chips on every finger are what say
+     which side this is. */
 
   .joblist { max-height: 40vh; overflow: auto; margin-top: 8px; }
   .track { height: 6px; border-radius: 999px; background: var(--divider-color, #e0e0e0);
@@ -191,6 +200,20 @@ function esc(value) {
 function shortApid(apid) {
   const text = String(apid || "");
   return text.length > 16 ? `${text.slice(0, 8)}…${text.slice(-4)}` : text;
+}
+
+/* The arrow that folds a user's finger rows away (both user lists). `key` is the entry in
+   _openUsers; the rows themselves sit in the item's .fingers block. */
+const FOLD_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function foldButton(key, open) {
+  return `<button class="fold" type="button" data-fold="${esc(key)}" aria-expanded="${open}"
+      title="${open ? "Hide" : "Show"} fingers">${FOLD_SVG}</button>`;
+}
+
+function fingerCount(n) {
+  return `<span class="count">${n} finger${n === 1 ? "" : "s"}</span>`;
 }
 
 /* Clip BEFORE escaping, never after. Cutting an escaped string can slice
@@ -258,6 +281,9 @@ class EkeyPanel extends HTMLElement {
     this._enrollUser = null;   // user_id chosen in the picker
     this._enrollStarting = false;  // the start request is in flight
     this._editing = null;      // user_id being edited
+    /* Users whose finger rows are unfolded, as "<list>:<user>" — folded is the default, so a
+       site with many users lists one line each. Survives _render(), not a reload. */
+    this._openUsers = new Set();
     this._message = null;      // { text, kind }
     this._loading = false;
     this._unsub = null;
@@ -618,6 +644,11 @@ class EkeyPanel extends HTMLElement {
       const loaded = this._scanners.find((s) => s.loaded);
       this._entryId = (loaded || this._scanners[0] || {}).entry_id || null;
       this._applySelection(this._recallSelection());
+      /* Opening the tab always starts on the fingerprint storage — the overview of every
+         scanner — whatever view was left last time. The remembered scanner stays the one
+         the picker's scanner entries and "Back to the scanner page" go to. Not with no
+         scanner configured: that view needs one (see _applySelection). */
+      if (this._scanners.length) this._mode = "storage";
     } catch (err) {
       this._say(`Could not read the scanner list: ${err.message || err}`, "err");
       return;
@@ -820,7 +851,6 @@ class EkeyPanel extends HTMLElement {
          the last-selected SCANNER, and letting either of them win would replace the
          database view with a card about something else entirely. */
       if (this._storage) {
-        parts.push(this._renderStorageBanner());
         parts.push(this._renderStorageTools());
         parts.push(this._renderStorageUsers());
         parts.push(this._renderStorageExtras());
@@ -862,8 +892,7 @@ class EkeyPanel extends HTMLElement {
     /* Last, so the overlay paints over the page rather than relying on z-index alone
        to beat a card that comes after it. */
     parts.push(modal);
-    /* One class carries the whole storage tint — see the .storage rules in STYLE. */
-    this._body.className = this._mode === "storage" ? "wrap storage" : "wrap";
+    this._body.className = "wrap";   // the same in both modes — see the note in STYLE
     this._snapshotForm();
     this._body.innerHTML = parts.join("");
     this._wire();
@@ -958,16 +987,20 @@ class EkeyPanel extends HTMLElement {
     const scanner = this._scanners.find((s) => s.entry_id === this._entryId) || {};
     /* Scanner mode has two faces: the scanner's own page, and Home Assistant's side
        of it (users linked to persons). One button switches, and says where it goes. */
-    const toggle = !storage && this._scanners.length
+    const toggle = storage && this._scanners.length
+      ? `<div class="bar" style="margin-top:8px"><button class="ghost" id="storage-back"${
+          busy ? " disabled" : ""}>Back to the scanner page</button></div>`
+      : this._scanners.length
       ? `<div class="bar" style="margin-top:8px"><button class="ghost" id="view-toggle"${
           busy ? " disabled" : ""}>${this._scannerView === "page"
           ? "Users &amp; persons in Home Assistant" : "Back to the scanner page"}</button></div>`
       : "";
+    const count = this._scanners.length;
     const heading = storage
-      ? `<h1>Fingerprint storage <span class="tag">Home Assistant</span></h1>
-         <p class="sub">Home Assistant's own copy of every fingerprint template. Nothing here
-           opens a door by itself — a scanner does that. Use it to repair a scanner, add a new
-           one, or recover after a factory reset.</p>`
+      ? `<h1>Fingerprint storage</h1>
+         <p class="sub">Home Assistant's own copy of every fingerprint template — the database,
+           not a scanner. Nothing here opens a door by itself; the chips on each finger show what
+           your ${count} scanner${count === 1 ? "" : "s"} actually hold.</p>`
       : this._scannerView === "page"
       ? `<h1>${safe(scanner.title || "ekey scanner")}</h1>
          <p class="sub">The scanner's own pages — access log, users, actions and settings —
@@ -1059,12 +1092,21 @@ class EkeyPanel extends HTMLElement {
               </div>`;
           }).join("")
         : '<p class="hint">No fingerprints yet.</p>';
+      const key = `s:${this._entryId}:${user.id}`;
+      const open = this._openUsers.has(key);
+      /* The missing count stays on the name line — a problem must not hide behind the arrow. */
+      const gone = this._data.scanner_list_known ? fingers.filter((f) => missing.has(f.apid)).length : 0;
       return `<div class="item">
           <div class="top">
-            <div><span class="name">${esc(user.username)}</span>${person}</div>
+            <div class="who">
+              ${fingers.length ? foldButton(key, open) : ""}
+              <div><span class="name">${esc(user.username)}</span>${
+                fingers.length ? fingerCount(fingers.length) : ""}${
+                gone ? `<span class="badge warn">${gone} missing on scanner</span>` : ""}${person}</div>
+            </div>
             <div><button class="sm ghost" data-edit="${esc(user.id)}"${busy ? " disabled" : ""}>Edit</button></div>
           </div>
-          ${fingerHtml}
+          ${fingers.length ? `<div class="fingers"${open ? "" : " hidden"}>${fingerHtml}</div>` : fingerHtml}
         </div>`;
     });
 
@@ -1081,6 +1123,8 @@ class EkeyPanel extends HTMLElement {
               : "This scanner's fingerprint list could not be read just now, so there is nothing to copy."}"
             >Sync to storage…</button>
           <button class="sm ghost" id="goto-storage">Open fingerprint storage</button>
+          ${users.length ? `<button class="sm ghost" data-fold-all="open">&#9660; Show all</button>
+          <button class="sm ghost" data-fold-all="close">&#9650; Hide all</button>` : ""}
         </div>
         ${users.length ? "" : '<p class="hint">No users yet — add one above, then enroll a finger.</p>'}
         <p class="hint">The database keeps a copy of each template, so this scanner can be
@@ -1117,6 +1161,10 @@ class EkeyPanel extends HTMLElement {
           <button data-save="${esc(user.id)}">Save</button>
           <button class="ghost" id="cancel-edit">Cancel</button>
           <button class="danger" data-deluser="${esc(user.id)}">Delete user</button>
+          <button class="danger" data-purge-user-entry="${esc(user.id)}"
+                  data-purge-user-label="${safe(user.username)}"
+                  title="Delete this user and their fingerprints on every scanner and in the database"
+                  >Delete on every scanner…</button>
         </div>
       </div>`;
   }
@@ -1158,16 +1206,6 @@ class EkeyPanel extends HTMLElement {
 
   // ------------------------------------------------------------ storage view
 
-  _renderStorageBanner() {
-    const count = (this._storage.scanners || []).length;
-    return `<div class="card banner" role="note">
-        <p class="sub"><b>You are looking at the database, not a scanner.</b> These records live
-          in Home Assistant. The chips on the right of each finger say what your ${count}
-          scanner${count === 1 ? "" : "s"} actually hold — that is the only place on this page
-          where a sensor is described.</p>
-      </div>`;
-  }
-
   _renderStorageTools() {
     const s = this._storage;
     const busy = this._jobRunning();
@@ -1183,22 +1221,37 @@ class EkeyPanel extends HTMLElement {
     /* The outcome of the last job, where it can be read and ignored. It used to be
        re-opened as a modal on every reload — see _loadStorage. */
     const last = s.job && s.job.done && s.job.message && !this._job ? s.job : null;
+    /* The card in the "Add user" slot of the scanner page: the whole-database actions.
+       Enroll, Refresh and Sync sit in the users card's bar, where the scanner page has them. */
     return `<div class="card">
         <h2>Storage tools</h2>
-        <div class="bar">
-          <button id="storage-enroll"${busy ? " disabled" : ""}>Enroll fingerprint…</button>
-          <button class="ghost" id="storage-sync"${busy ? " disabled" : ""}>Sync from a scanner…</button>
-          <button class="ghost" id="storage-backup"${busy ? " disabled" : ""}>Create backup…</button>
-          <button class="ghost" id="storage-restore"${busy ? " disabled" : ""}>Restore backup…</button>
-          <button class="ghost" id="storage-refresh"${
-            busy || this._refreshing ? " disabled" : ""}>${
-            this._refreshing ? "Asking the scanners…" : "Refresh"}</button>
-          <button class="danger" id="storage-clean"${busy || !s.record_count ? " disabled" : ""}>Clean storage…</button>
-        </div>
-        <p class="hint">${s.record_count} fingerprint(s) for ${s.user_count} user(s),
-          ${humanBytes(s.bytes)}. Last change ${esc(changed)}.
+        <p class="hint" style="margin-top:0">${s.record_count} fingerprint(s) for ${s.user_count}
+          user(s), ${humanBytes(s.bytes)}. Last change ${esc(changed)}.
           Scanners checked ${esc(checked)}.</p>
         ${last ? `<p class="hint">Last job: ${safe(last.message)}</p>` : ""}
+        <div class="bar">
+          <button id="storage-backup"${busy ? " disabled" : ""}>Create backup…</button>
+          <button class="ghost" id="storage-restore"${busy ? " disabled" : ""}>Restore backup…</button>
+          <button class="danger" id="storage-clean"${busy || !s.record_count ? " disabled" : ""}>Clean storage…</button>
+        </div>
+      </div>`;
+  }
+
+  /* The users card's button bar — the scanner page's "Enroll fingerprint… / Refresh /
+     Sync to storage… / Open fingerprint storage" row, mirrored. */
+  _renderStorageBar(drift) {
+    const busy = this._jobRunning();
+    const users = (this._storage.users || []).length;
+    return `<div class="bar">
+        <button id="storage-enroll"${busy ? " disabled" : ""}>Enroll fingerprint…</button>
+        <button class="ghost" id="storage-refresh"${
+          busy || this._refreshing ? " disabled" : ""}>${
+          this._refreshing ? "Asking the scanners…" : "Refresh"}</button>
+        <button class="ghost" id="storage-sync"${busy ? " disabled" : ""}>Sync from a scanner…</button>
+        ${drift ? `<button class="ghost" id="storage-push"${busy ? " disabled" : ""}
+          >Push ${drift} missing fingerprint(s)…</button>` : ""}
+        ${users ? `<button class="sm ghost" data-fold-all="open">&#9660; Show all</button>
+        <button class="sm ghost" data-fold-all="close">&#9650; Hide all</button>` : ""}
       </div>`;
   }
 
@@ -1287,7 +1340,8 @@ class EkeyPanel extends HTMLElement {
     const busy = this._jobRunning();
     if (!s.users.length) {
       return `<div class="card">
-          <h2>Fingerprints in the database</h2>
+          <h2>Users &amp; fingerprints</h2>
+          ${this._renderStorageBar(0)}
           <p class="empty">The database is empty. Use <b>Sync from a scanner…</b> to copy the
             fingerprints your scanners already hold into Home Assistant — nothing is written to
             any scanner and nobody has to present a finger.</p>
@@ -1296,9 +1350,11 @@ class EkeyPanel extends HTMLElement {
 
     let drift = 0;
     const rows = s.users.map((user) => {
+      let behind = 0;   // this user's fingers not on every scanner
       const fingers = user.fingers.map((finger) => {
         const chips = this._matrixChips(finger);
         drift += chips.missing;
+        if (chips.missing) behind++;
         const badge = finger.has_template === false
           ? '<span class="badge warn">no template stored</span>'
           : '<span class="badge ok">on database</span>';
@@ -1327,16 +1383,25 @@ class EkeyPanel extends HTMLElement {
           </div>`;
       }).join("");
 
+      const key = `db:${user.key}`;
+      const open = this._openUsers.has(key);
       return `<div class="item">
           <div class="top">
-            <div>
-              <div class="name">${safe(user.username)}</div>
-              ${user.ha_person
-                ? `<div class="person">${safe(user.ha_person)}</div>`
-                : '<div class="person muted">not linked to a Home Assistant person</div>'}
+            <div class="who">
+              ${user.fingers.length ? foldButton(key, open) : ""}
+              <div>
+                <div><span class="name">${safe(user.username)}</span>${fingerCount(user.fingers.length)}${
+                  behind ? `<span class="badge warn">${behind} not on every scanner</span>` : ""}</div>
+                ${user.ha_person
+                  ? `<div class="person">${safe(user.ha_person)}</div>`
+                  : '<div class="person muted">not linked to a Home Assistant person</div>'}
+              </div>
             </div>
+            <div><button class="sm ghost" data-purge-user="${esc(user.key)}"
+                    data-purge-user-label="${safe(user.username)}"${busy ? " disabled" : ""}
+                    >Delete user everywhere…</button></div>
           </div>
-          ${fingers}
+          <div class="fingers"${open ? "" : " hidden"}>${fingers}</div>
         </div>`;
     }).join("");
 
@@ -1358,14 +1423,13 @@ class EkeyPanel extends HTMLElement {
     }
 
     return `<div class="card">
-        <h2>Fingerprints in the database</h2>
-        <div class="bar">
-          <button class="ghost" id="storage-push"${busy || !drift ? " disabled" : ""}
-            >Push ${drift} missing fingerprint(s)…</button>
-        </div>
+        <h2>Users &amp; fingerprints</h2>
+        ${this._renderStorageBar(drift)}
+        <p class="hint">The database keeps a copy of each template, so any scanner can be
+          repaired or replaced without asking anyone to enroll again.</p>
         ${summary}
-        ${this._renderLegend()}
         ${rows}
+        ${this._renderLegend()}
       </div>`;
   }
 
@@ -1458,6 +1522,7 @@ class EkeyPanel extends HTMLElement {
       case "syncFrom": return this._renderSyncFrom();
       case "enroll": return this._renderStorageEnroll();
       case "purge": return this._renderPurge();
+      case "purgeUser": return this._renderPurgeUser();
       case "backup": return this._renderBackup();
       case "restore": return this._renderRestore();
       case "clean": return this._renderClean();
@@ -1468,6 +1533,7 @@ class EkeyPanel extends HTMLElement {
   _renderScannerModal() {
     if (this._job) return this._renderJob();
     const dialog = this._dialog;
+    if (dialog && dialog.kind === "purgeUser") return this._renderPurgeUser();
     if (!dialog || dialog.kind !== "syncTo") return "";
     return this._renderSyncTo();
   }
@@ -1596,6 +1662,29 @@ class EkeyPanel extends HTMLElement {
           : `Delete from ${holders.length} scanner(s) and the database`}</button>
         <button class="ghost" id="pg-cancel"${busy ? " disabled" : ""}>Cancel</button>
       </div>`, { title: "Delete this fingerprint everywhere" });
+  }
+
+  _renderPurgeUser() {
+    const dialog = this._dialog;
+    const busy = dialog.busy;
+    const scanners = (this._scanners || []).length;
+    return this._renderDialog(`
+      <p class="hint" style="margin-top:0"><b>${safe(dialog.label)}</b> is deleted from every
+        scanner: each of their fingerprints is removed from the sensor, the sensor is re-read
+        to confirm it is really gone, and only then is the user taken out of that scanner's
+        list. Home Assistant's copies of their fingerprints are deleted last — and only if
+        every scanner confirmed.</p>
+      ${dialog.fingers != null
+        ? `<p class="hint">${dialog.fingers} fingerprint(s) of theirs are in the database.</p>` : ""}
+      <p class="hint">Scanners: ${scanners}. A scanner that cannot be asked what it holds keeps
+        whatever it has, and so does the database — running this again later is safe.</p>
+      <p class="hint">This cannot be undone from here: the person has to enroll again, or the
+        fingerprints have to come back from a backup.</p>
+      <div class="bar">
+        <button class="danger" id="pu-go"${busy ? " disabled" : ""}>${busy ? "Starting…"
+          : `Delete ${safe(dialog.label, 40)} everywhere`}</button>
+        <button class="ghost" id="pu-cancel"${busy ? " disabled" : ""}>Cancel</button>
+      </div>`, { title: "Delete this user on every scanner" });
   }
 
   _renderSyncTo() {
@@ -1974,6 +2063,10 @@ class EkeyPanel extends HTMLElement {
 
     // ---- storage view -------------------------------------------------------
     on("goto-storage", "click", () => this._selectMode(STORAGE_ID));
+    on("storage-back", "click", () => {
+      this._scannerView = "page";
+      this._selectMode(this._entryId || (this._scanners[0] || {}).entry_id);
+    });
     on("sync-to-storage", "click", () => this._openSyncTo());
     on("storage-sync", "click", () => this._openSyncFrom());
     on("storage-backup", "click", () => this._openDialog({ kind: "backup", encrypt: true }));
@@ -2005,6 +2098,8 @@ class EkeyPanel extends HTMLElement {
     on("en2-cancel", "click", () => this._closeDialog());
     on("pg-go", "click", () => this._startPurge());
     on("pg-cancel", "click", () => this._closeDialog());
+    on("pu-go", "click", () => this._startPurgeUser());
+    on("pu-cancel", "click", () => this._closeDialog());
 
     on("st-go", "click", () => this._startSyncTo());
     on("st-cancel", "click", () => this._closeDialog());
@@ -2089,6 +2184,40 @@ class EkeyPanel extends HTMLElement {
     root.querySelectorAll("[data-adopt]").forEach((el) =>
       el.addEventListener("click", () => this._adopt(
         el.getAttribute("data-adopt"), el.getAttribute("data-adopt-entry"))));
+
+    root.querySelectorAll("[data-purge-user]").forEach((el) =>
+      el.addEventListener("click", () => this._openPurgeUser({
+        key: el.getAttribute("data-purge-user"),
+        label: el.getAttribute("data-purge-user-label"),
+      })));
+    root.querySelectorAll("[data-purge-user-entry]").forEach((el) =>
+      el.addEventListener("click", () => this._openPurgeUser({
+        entryId: this._entryId,
+        userId: el.getAttribute("data-purge-user-entry"),
+        label: el.getAttribute("data-purge-user-label"),
+      })));
+
+    /* One user: toggled in place, no re-render, so focus stays on the arrow. */
+    root.querySelectorAll("[data-fold]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const key = el.getAttribute("data-fold");
+        const open = !this._openUsers.has(key);
+        if (open) this._openUsers.add(key); else this._openUsers.delete(key);
+        el.setAttribute("aria-expanded", String(open));
+        el.title = `${open ? "Hide" : "Show"} fingers`;
+        const list = el.closest(".item")?.querySelector(".fingers");
+        if (list) list.hidden = !open;
+      }));
+    /* Show / Hide all: every user in the same card. */
+    root.querySelectorAll("[data-fold-all]").forEach((el) =>
+      el.addEventListener("click", () => {
+        const open = el.getAttribute("data-fold-all") === "open";
+        el.closest(".card")?.querySelectorAll("[data-fold]").forEach((b) => {
+          const key = b.getAttribute("data-fold");
+          if (open) this._openUsers.add(key); else this._openUsers.delete(key);
+        });
+        this._render();
+      }));
   }
 
   // --------------------------------------------------------------------- actions
@@ -2207,6 +2336,35 @@ class EkeyPanel extends HTMLElement {
     this._openDialog({ kind: "purge", apid, label: label || apid, holders, unknown });
   }
 
+  /* `key` from the storage list, or `entryId` + `userId` from a scanner's user editor —
+     the server resolves the latter to the same database person. */
+  _openPurgeUser({ key = null, entryId = null, userId = null, label = "" }) {
+    const stored = key ? (this._storage?.users || []).find((u) => u.key === key) : null;
+    this._openDialog({
+      kind: "purgeUser", key, entryId, userId, label: label || key || userId,
+      fingers: stored ? stored.fingers.length : null,
+    });
+  }
+
+  async _startPurgeUser() {
+    const dialog = this._dialog;
+    dialog.busy = true;
+    this._render();
+    const message = dialog.key
+      ? { type: "ekey_ha_app/storage/purge_user", key: dialog.key, confirm: dialog.key }
+      : { type: "ekey_ha_app/storage/purge_user", entry_id: dialog.entryId,
+          user_id: dialog.userId, confirm: dialog.userId };
+    const result = await this._call(message);
+    if (result) {
+      this._dialog = null;
+      this._editing = null;
+      this._job = result;
+    } else {
+      dialog.busy = false;
+    }
+    this._render();
+  }
+
   _recordFor(apid) {
     for (const user of (this._storage.users || [])) {
       for (const finger of (user.fingers || [])) {
@@ -2308,6 +2466,19 @@ class EkeyPanel extends HTMLElement {
   async _retryFailed() {
     const failed = (this._job.items || []).filter((item) => item.state === "failed");
     if (!failed.length) return;
+    /* A failed delete is retried as the delete. Falling through to the push below would
+       copy the fingerprint BACK onto the scanners that were supposed to lose it. */
+    const { kind, target } = this._job;
+    if (kind === "purge_user" || kind === "purge_fingerprint") {
+      if (!target) return;
+      this._job = null;
+      const result = await this._call(kind === "purge_user"
+        ? { type: "ekey_ha_app/storage/purge_user", key: target, confirm: target }
+        : { type: "ekey_ha_app/storage/purge_fingerprint", apid: target, confirm: target });
+      if (result) this._job = result;
+      this._render();
+      return;
+    }
     const apids = [...new Set(failed.map((item) => item.apid))];
     const entryIds = [...new Set(failed.map((item) => item.entry_id).filter(Boolean))];
     this._job = null;

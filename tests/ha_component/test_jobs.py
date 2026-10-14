@@ -311,6 +311,65 @@ async def test_push_writes_the_template_then_the_assignment():
     }
 
 
+async def test_push_assigns_once_per_scanner_not_once_per_fingerprint():
+    """Every template first, then the scanner's user list read and written ONCE.
+
+    Assigning after each template cost four more requests per fingerprint (read the list,
+    write it, re-read it and the fingerprint list for the snapshot); the next template
+    needs none of them."""
+    hass, session, _, vault = build()
+    await stocked(hass, vault)
+    await vault.async_put(
+        apid=REAL_APID_B, username="Master", finger=8,
+        template=parse_template_hex(TEMPLATE_B), dev_variant=10, source_entry_id="e1",
+    )
+    session.add_sequence("PUT", PUT_TEMPLATE, [
+        FakeResponse(200, put_reply(REAL_APID_A)),
+        FakeResponse(200, put_reply(REAL_APID_B)),
+    ])
+    session.add("GET", "/app/v1/users", body=[])
+    session.add("PUT", "/app/v1/users", body={"status": "saved"})
+    manager = VaultJobManager(hass)
+
+    await manager.async_push()
+    status = await run_to_completion(hass, manager)
+
+    assert status["counts"] == {"ok": 2, "skipped": 0, "failed": 0}
+    methods = [(c["method"], c["path"]) for c in session.calls]
+    assert methods[:2] == [("PUT", PUT_TEMPLATE), ("PUT", PUT_TEMPLATE)], \
+        "both templates go out before any user-list traffic"
+    assert methods.count(("GET", "/app/v1/users")) == 1
+    assert methods.count(("PUT", "/app/v1/users")) == 1
+
+    written = session.last_json("PUT", "/app/v1/users")
+    assert len(written) == 1, "one user, found again for the second fingerprint"
+    assert [f["finger"] for f in written[0]["fingers"]] == [7, 8]
+
+
+async def test_a_failed_user_list_write_marks_every_template_of_that_scanner():
+    """One write for the batch, so its failure is every fingerprint's: each one is on
+    the sensor and opens the door, but nobody is named for it."""
+    hass, session, _, vault = build()
+    await stocked(hass, vault)
+    await vault.async_put(
+        apid=REAL_APID_B, username="Master", finger=8,
+        template=parse_template_hex(TEMPLATE_B), dev_variant=10, source_entry_id="e1",
+    )
+    session.add_sequence("PUT", PUT_TEMPLATE, [
+        FakeResponse(200, put_reply(REAL_APID_A)),
+        FakeResponse(200, put_reply(REAL_APID_B)),
+    ])
+    session.add("GET", "/app/v1/users", body=[])
+    session.add("PUT", "/app/v1/users", status=500, body={"error": "disk full"})
+    manager = VaultJobManager(hass)
+
+    await manager.async_push()
+    status = await run_to_completion(hass, manager)
+
+    assert status["counts"]["failed"] == 2
+    assert {i["reason"] for i in status["items"]} == {REASON_TEMPLATE_ONLY}
+
+
 async def test_verified_false_is_never_counted_as_stored():
     """THE test. 200, rpc_error_code OK, and the scanner kept nothing."""
     hass, session, _, vault = build()
@@ -869,6 +928,86 @@ async def test_the_record_is_the_last_item_reported():
 
     assert status["items"][-1]["scanner"] is None
     assert status["items"][-1]["detail"] == "removed from the database"
+
+
+# ------------------------------------------------- deleting a user everywhere
+#
+# The single purge widened to a person. Same rule: the sensor is re-read before
+# anything is dropped — the user entry on that scanner, and the database last.
+
+DELETE_B = f"/api/v1/fingerprints/{REAL_APID_B}"
+OTHER_USER = {"id": "u2", "username": "Guest", "fingers": []}
+
+
+async def test_a_user_purge_deletes_every_finger_then_the_user_then_the_records():
+    hass, session, _, vault = build(on_scanner=[REAL_APID_A, REAL_APID_B])
+    await stocked(hass, vault)          # A is Master's finger 7 in the database
+    session.add("GET", "/app/v1/users", body=USERS + [OTHER_USER])
+    session.add("DELETE", DELETE_A, body={"rpc_error_code": "OK"})
+    session.add("DELETE", DELETE_B, body={"rpc_error_code": "OK"})
+    session.add("GET", LIST, body={"aps": []})
+    session.add("PUT", "/app/v1/users", body={"status": "saved"})
+    manager = VaultJobManager(hass)
+
+    status = await manager.async_purge_user("name:master")
+    assert status["kind"] == "purge_user" and status["target"] == "name:master"
+    status = await run_to_completion(hass, manager)
+
+    deleted = {c["path"] for c in session.calls if c["method"] == "DELETE"}
+    # B is not in the database — it is found through the scanner's user entry.
+    assert deleted == {DELETE_A, DELETE_B}
+    written = session.last_json("PUT", "/app/v1/users")
+    assert [u["id"] for u in written] == ["u2"], "Master went, nobody else did"
+    assert REAL_APID_A not in vault.data["records"]
+    assert status["counts"]["failed"] == 0
+    assert status["items"][-1]["scanner"] is None, "the database is reported last"
+
+
+async def test_a_finger_left_on_the_sensor_keeps_the_user_and_the_records():
+    hass, session, _, vault = build(on_scanner=[REAL_APID_A, REAL_APID_B])
+    await stocked(hass, vault)
+    session.add("GET", "/app/v1/users", body=USERS)
+    session.add("DELETE", DELETE_A, body={"rpc_error_code": "OK"})
+    session.add("DELETE", DELETE_B, body={"rpc_error_code": "OK"})
+    session.add("GET", LIST, body={"aps": [REAL_APID_B]})   # B survived
+    manager = VaultJobManager(hass)
+
+    await manager.async_purge_user("name:master")
+    status = await run_to_completion(hass, manager)
+
+    assert session.last_json("PUT", "/app/v1/users") is None, "the user is kept"
+    assert REAL_APID_A in vault.data["records"], "and so is the database"
+    assert status["items"][0]["state"] == STATE_FAILED
+    assert status["items"][0]["reason"] == REASON_STILL_PRESENT
+
+
+async def test_a_linked_namesake_is_not_the_user_being_deleted():
+    """Deleting by name must not take a different, linked person with the same name."""
+    hass, session, _, vault = build(on_scanner=[REAL_APID_B])
+    namesake = [{"id": "u9", "username": "Master", "ha_person": "person.someone_else",
+                 "fingers": [{"finger": 1, "apid": REAL_APID_B}]}]
+    session.add("GET", "/app/v1/users", body=namesake)
+    manager = VaultJobManager(hass)
+
+    await manager.async_purge_user("name:master")
+    status = await run_to_completion(hass, manager)
+
+    assert not any(c["method"] in ("DELETE", "PUT") for c in session.calls)
+    assert status["items"][0]["state"] == STATE_OK
+    assert "no user entry here" in status["items"][0]["detail"]
+
+
+async def test_an_unreadable_scanner_blocks_the_user_purge():
+    hass, session, _, vault = build(list_known=False)
+    await stocked(hass, vault)
+    manager = VaultJobManager(hass)
+
+    await manager.async_purge_user("name:master")
+    status = await run_to_completion(hass, manager)
+
+    assert session.calls == [], "nothing is deleted against a list we could not read"
+    assert REAL_APID_A in vault.data["records"]
+    assert status["items"][0]["reason"] == REASON_LIST_UNKNOWN
 
 
 # ------------------------------------------------- enrol and fan out (phase 2)

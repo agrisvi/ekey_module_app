@@ -165,6 +165,7 @@ def async_register(hass: HomeAssistant) -> None:
         ws_storage_push,
         ws_storage_enroll,
         ws_storage_purge_fingerprint,
+        ws_storage_purge_user,
         ws_storage_clean,
         ws_storage_job_cancel,
         ws_storage_backup_begin,
@@ -953,6 +954,50 @@ async def ws_storage_purge_fingerprint(hass: HomeAssistant, connection, msg) -> 
         # the refusal it is. Same shape as storage/clean's word check.
         raise ValueError("the confirmation does not name the fingerprint to delete")
     status = await async_get_jobs(hass).async_purge_fingerprint(apid)
+    connection.send_result(msg["id"], status)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ekey_ha_app/storage/purge_user",
+        # Either the database person key (storage view), or a user on one scanner
+        # (that scanner's user editor) — resolved here to the same key.
+        vol.Optional("key"): str,
+        vol.Optional("entry_id"): str,
+        vol.Optional("user_id"): str,
+        vol.Required("confirm"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+@_handle_errors
+async def ws_storage_purge_user(hass: HomeAssistant, connection, msg) -> None:
+    """Delete a user — every fingerprint and the user entry — on every scanner, then
+    their records in the database. See ``VaultJobManager.async_purge_user``.
+
+    ``confirm`` must repeat the key, or the ``user_id`` when the user is named by
+    scanner. Re-checked here for the same reason as ``purge_fingerprint``.
+    """
+    username: str | None = None
+    if msg.get("key"):
+        key = str(msg["key"])
+        if str(msg["confirm"]) != key:
+            raise ValueError("the confirmation does not name the user to delete")
+    elif msg.get("entry_id") and msg.get("user_id"):
+        if str(msg["confirm"]) != msg["user_id"]:
+            raise ValueError("the confirmation does not name the user to delete")
+        rt = _runtime(hass, msg["entry_id"])
+        users = await rt.client.async_get_users()
+        user = next((u for u in users if u.get("id") == msg["user_id"]), None)
+        if user is None:
+            connection.send_error(msg["id"], ERR_NOT_FOUND, "no such user")
+            return
+        username = str(user.get("username") or "")
+        key = vault_mod.person_key(username, user_person(user))
+    else:
+        raise ValueError("name the user by key, or by entry_id and user_id")
+
+    status = await async_get_jobs(hass).async_purge_user(key, username)
     connection.send_result(msg["id"], status)
 
 
