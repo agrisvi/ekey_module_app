@@ -311,6 +311,30 @@ async def test_push_writes_the_template_then_the_assignment():
     }
 
 
+async def test_push_assigns_a_template_already_on_the_scanner_but_unassigned():
+    """A write whose read-back failed left the template on the sensor with nobody
+    named for it. Retrying must name its owner — not write it again, and not leave
+    it out because it is "already there": deleting that user would then leave the
+    template behind, still opening the door."""
+    hass, session, _, vault = build(on_scanner=(REAL_APID_A,))
+    hass.data[DOMAIN]["e1"]["app_coordinator"].data["unassigned"] = [REAL_APID_A]
+    await stocked(hass, vault)
+    session.add("GET", "/app/v1/users", body=[])
+    session.add("PUT", "/app/v1/users", body={"status": "saved"})
+    manager = VaultJobManager(hass)
+
+    await manager.async_push(apids=[REAL_APID_A])
+    status = await run_to_completion(hass, manager)
+
+    assert status["counts"] == {"ok": 1, "skipped": 0, "failed": 0}
+    methods = [(c["method"], c["path"]) for c in session.calls]
+    assert ("PUT", PUT_TEMPLATE) not in methods
+    written = session.last_json("PUT", "/app/v1/users")
+    assert written[0]["username"] == "Master"
+    assert written[0]["fingers"][0]["apid"] == REAL_APID_A
+    assert written[0]["fingers"][0]["finger"] == 7
+
+
 async def test_push_assigns_once_per_scanner_not_once_per_fingerprint():
     """Every template first, then the scanner's user list read and written ONCE.
 
@@ -395,6 +419,24 @@ async def test_an_unconfirmed_write_is_retryable_but_a_refusal_is_not():
     await stocked(hass, vault)
     session.add("PUT", PUT_TEMPLATE, body=put_reply(
         REAL_APID_A, verified=False, verdict="transport_ack_only"))
+    manager = VaultJobManager(hass)
+
+    await manager.async_push()
+    status = await run_to_completion(hass, manager)
+
+    assert status["items"][0]["state"] == STATE_FAILED
+    assert status["items"][0]["reason"] == REASON_NOT_VERIFIED
+
+
+async def test_a_write_whose_read_back_failed_is_retryable():
+    """No ``verified`` field means the backend could not read the saved list back —
+    a touch on the sensor during the read-back did this on an ESP32. Whether the
+    template landed is unknown, so it must be offered a retry, not skipped for good."""
+    hass, session, _, vault = build()
+    await stocked(hass, vault)
+    reply = put_reply(REAL_APID_A)
+    del reply["verified"]
+    session.add("PUT", PUT_TEMPLATE, body=reply)
     manager = VaultJobManager(hass)
 
     await manager.async_push()

@@ -267,6 +267,28 @@ async def test_the_cache_is_refreshed_before_the_enrollment_is_announced():
     assert "refresh" not in log.events[2:], "and the refresh does not happen twice"
 
 
+async def test_a_scanner_session_reset_ends_the_enrollment_at_once():
+    """CMD_RESET_SESSION drops the scanner out of enrollment with no closing state; the
+    panel kept showing "Reading the finger…" for two minutes. Only this scanner's reset
+    counts, and before the confirmation nothing can have been stored."""
+    from types import SimpleNamespace
+
+    from custom_components.ekey_ha_app.enroll import EnrollManager, EnrollSession
+
+    log = _OrderRecorder()
+    hass = _FakeHass(log)
+    manager = EnrollManager(hass, "entry1", _FakeClient(log, []), _FakeCoordinator(log))
+    session = EnrollSession("AP-1", "u1", "Jane", 7)
+    manager.sessions[session.apid] = session
+
+    manager._handle_session_reset(SimpleNamespace(data={"entry_id": "other"}))
+    assert not session.done, "another scanner's reset changes nothing here"
+
+    manager._handle_session_reset(SimpleNamespace(data={"entry_id": "entry1"}))
+    assert session.done and session.ok is False
+    assert "reset" in session.message and "Nothing was stored" in session.message
+
+
 async def test_a_refresh_failure_still_finishes_the_enrollment():
     """The fingerprint IS on the scanner; a stale list must not hide that."""
     from custom_components.ekey_ha_app.enroll import EnrollManager, EnrollSession

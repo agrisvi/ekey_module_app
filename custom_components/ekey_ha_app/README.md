@@ -199,6 +199,7 @@ resolved name and the scanner as fields and need no string parsing.
 | `ekey_access_denied` | `apfar_desc`, `entity_id`, `entry_id` | Refusal, with the reason |
 | `ekey_enrollment_state` | `apid`, `enstat`, `entryc`, `ennumtpl` | Raw enrolment progress from the scanner |
 | `ekey_users_changed` | `entry_id`, `reason` | The user document changed |
+| `ekey_session_reset` | `entry_id`, `scanner_id` | The backend re-keyed the scanner session after a lost frame; a running enrollment there has ended (since 1.3.4) |
 | `ekey_connection_lost` | — | Connection to the backend lost |
 
 `entry_id` identifies which scanner an event came from — check it in any

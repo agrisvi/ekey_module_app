@@ -67,6 +67,9 @@ EVENT_FINGER_TOUCH = "ekey_finger_touch"
 EVENT_FINGERPRINT_MATCHED = "ekey_fingerprint_matched"
 EVENT_FINGERPRINT_NOT_MATCHED = "ekey_fingerprint_not_matched"
 EVENT_ENROLLMENT_STATE = "ekey_enrollment_state"
+# The backend re-established its scanner session (NOTIFY_SESSION_RESET). That also ends an
+# enrollment on the scanner, which then sends no NOTIFY_AP_ENROLL_STATE to say so.
+EVENT_SESSION_RESET = "ekey_session_reset"
 EVENT_ACCESS_GRANTED = "ekey_access_granted"
 EVENT_ACCESS_DENIED = "ekey_access_denied"
 

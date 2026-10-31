@@ -43,6 +43,7 @@ from .const import (
     ENROLL_STATE_FINISHED_SUCCESS,
     ENROLL_STATE_WAIT_FOR_CONFIRMATION,
     EVENT_ENROLLMENT_STATE,
+    EVENT_SESSION_RESET,
     EVENT_USERS_CHANGED,
 )
 
@@ -162,6 +163,7 @@ class EnrollManager:
         self.coordinator = coordinator
         self.sessions: dict[str, EnrollSession] = {}
         self._unsub = None
+        self._unsub_reset = None
         self._watchdog: asyncio.Task | None = None
 
     # ------------------------------------------------------------- lifecycle
@@ -173,6 +175,10 @@ class EnrollManager:
             self._unsub = self.hass.bus.async_listen(
                 EVENT_ENROLLMENT_STATE, self._handle_state
             )
+        if self._unsub_reset is None:
+            self._unsub_reset = self.hass.bus.async_listen(
+                EVENT_SESSION_RESET, self._handle_session_reset
+            )
 
     @callback
     def async_detach(self) -> None:
@@ -180,6 +186,9 @@ class EnrollManager:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        if self._unsub_reset is not None:
+            self._unsub_reset()
+            self._unsub_reset = None
         if self._watchdog is not None:
             self._watchdog.cancel()
             self._watchdog = None
@@ -361,6 +370,32 @@ class EnrollManager:
             return
 
         self._emit(session)
+
+    @callback
+    def _handle_session_reset(self, event) -> None:
+        """The backend re-keyed this scanner's session, which ended its enrollment.
+
+        The scanner drops back to normal mode with no closing state, so without this the
+        panel showed "Reading the finger…" until IDLE_TIMEOUT. Before the confirmation
+        nothing can have been stored; after it, ask the scanner like any late end.
+        """
+        if (event.data or {}).get("entry_id") != self.entry_id:
+            return
+        session = self.active_session()
+        if session is None:
+            return
+        if session.confirmed:
+            self.hass.async_create_task(self._verify_and_finish(session))
+            return
+        self._finish(
+            session,
+            ok=False,
+            message=(
+                "The link to the scanner was reset in the middle of the enrollment — a "
+                "reply was lost, usually while the finger was on the sensor — and the "
+                "scanner ended the session. Nothing was stored. Try again."
+            ),
+        )
 
     async def _confirm(self, session: EnrollSession) -> None:
         """Send the confirmation, retrying the send but not the decision."""

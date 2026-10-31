@@ -363,6 +363,7 @@ scanner gets two commands.
 | `ekey_access_denied` | `apfar_desc`, `entity_id`, `entry_id` | Refusal, with the reason |
 | `ekey_enrollment_state` | `apid`, `enstat`, `entryc`, `ennumtpl` | Enrollment progress update |
 | `ekey_users_changed` | `entry_id`, `reason` | The user document changed |
+| `ekey_session_reset` | `entry_id`, `scanner_id` | The backend lost a frame and re-keyed the scanner session; a running enrollment on that scanner has ended (since 1.3.4) |
 | `ekey_connection_lost` | — | Connection to daemon lost |
 
 `entry_id` says which scanner an event came from — check it in any automation on a

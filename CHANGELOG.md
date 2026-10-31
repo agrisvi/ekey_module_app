@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.4
+
+- **Fixed: a panel enrollment the scanner had abandoned kept saying "Reading the finger…"
+  for two minutes.** When the backend loses a frame, it re-establishes the scanner session,
+  and that ends the enrollment on the scanner with no closing state. Backends now send
+  `NOTIFY_SESSION_RESET`. The SSE listener fires it on the bus as `ekey_session_reset` (with
+  `entry_id`), and `EnrollManager` ends that scanner's running enrollment at once. If it had
+  been confirmed, it checks the scanner's list first. (`const.py`, `sse_listener.py`,
+  `enroll.py`, test in `test_capabilities_and_enroll.py`)
+
+- **The copy dialog's title counts what it will copy.** It said "Copying 30 fingerprint(s)"
+  when 20 of the 30 in the database were already on the scanner and the job wrote 10, so the
+  title and the "Writing 8 of 10" line underneath disagreed. The title now says 10. When the
+  job also assigns fingerprints that are already on the scanner, it says how many. (`jobs.py`)
+
+- **Fixed: a copied fingerprint whose check failed was reported as "skipped" and never
+  offered a retry.** After writing a template the backend reads the scanner's list back and
+  answers `verified`. When that read-back itself failed (a finger on the sensor at that moment
+  is enough) the reply had no `verified` at all. That "unknown" was treated like "the scanner
+  refused it" — a permanent skip. A missing `verified` is now a retryable failure
+  (`not_verified`), so **Retry the N that failed** picks it up. `verified: false` with the
+  device's own verdict is still a skip. (`jobs.py`)
+- **Fixed: a template on the scanner with nobody named for it was never assigned.** When the
+  check after a write failed, the template was on the sensor but not in its user list. A push
+  or a retry then left it out, because it was "already on the scanner". Deleting that user on
+  the device later deleted only the fingerprints the list named, and this one stayed behind
+  under "Unassigned fingerprints", still opening the door. A push now assigns such a
+  fingerprint to its owner from the database in the same single user-list write, and does not
+  write the template again. (`jobs.py`)
+
 ## 1.3.3
 
 - **Copying fingerprints to a scanner is faster.** A push used to update the scanner's

@@ -250,6 +250,17 @@ class ScannerRef:
         aps = data.get("scanner_aps")
         return set(aps) if isinstance(aps, list) else set()
 
+    @property
+    def unassigned(self) -> set[str]:
+        """APIDs the sensor holds that no user in its list claims.
+
+        Empty when the sensor list could not be read: the coordinator then reports no
+        unassigned ones rather than guessing, and so does this.
+        """
+        data = getattr(self.app_coordinator, "data", None) or {}
+        aps = data.get("unassigned")
+        return set(aps) if isinstance(aps, list) else set()
+
 
 def scanner_refs(hass: HomeAssistant, entry_ids: list[str] | None = None) -> list[ScannerRef]:
     """Every loaded scanner, or the named ones. Unloaded entries are skipped."""
@@ -315,8 +326,11 @@ def _classify(err: Exception) -> tuple[str, str]:
         # ``device_response`` is the scanner having looked at the template and
         # refused it, which is permanent (the variant or the salt) and must not be
         # offered a retry. ``transport_ack_only`` means nobody ever confirmed
-        # either way, which is worth trying again.
-        if err.verdict == "transport_ack_only":
+        # either way, which is worth trying again. So does a reply with no
+        # ``verified`` at all: the backend could not read the list back (a finger on
+        # the sensor during the read-back is enough), which says nothing about the
+        # template — "unknown" must not become a permanent skip.
+        if err.verdict == "transport_ack_only" or err.verified is None:
             return STATE_FAILED, REASON_NOT_VERIFIED
         return STATE_SKIPPED, REASON_NOT_VERIFIED
     if isinstance(err, EkeyNotFoundError):
@@ -674,27 +688,40 @@ class VaultJobManager:
 
             refs = scanner_refs(self.hass, entry_ids)
             work: list[tuple[str, dict[str, Any], ScannerRef]] = []
+            assign_only: list[tuple[str, dict[str, Any], ScannerRef]] = []
             for ref in refs:
                 if not ref.list_known:
                     # Unknown is not missing. Pushing here would be a minutes-long
                     # job against a guess.
                     continue
+                unassigned = ref.unassigned
                 for apid, record in records.items():
                     if apid not in ref.on_scanner:
                         work.append((apid, record, ref))
+                    elif apid in unassigned:
+                        # On the sensor but nobody named for it: a write whose check
+                        # failed (a finger on the sensor during the read-back) stored
+                        # the template and never assigned it. Writing it again would
+                        # change nothing; naming its owner is what is missing — and
+                        # without it, deleting that user later leaves the template
+                        # behind, opening the door for nobody in the list.
+                        assign_only.append((apid, record, ref))
 
-            job = self._begin(
-                "push",
-                f"Copying {len(records)} fingerprint(s) from the database to the scanners",
-                len(work),
-            )
+            # The title counts what this job will do, not what the database holds: it
+            # said "Copying 30" over a progress line that ran to 10, because 20 of the
+            # 30 were already on the scanner and never part of the job.
+            title = f"Copying {len(work)} fingerprint(s) from the database to the scanners"
+            if assign_only:
+                title += f" and naming the owner of {len(assign_only)} already there"
+            job = self._begin("push", title, len(work) + len(assign_only))
         finally:
             self._release()
-        self._spawn(job, lambda j: self._run_push(j, work))
+        self._spawn(job, lambda j: self._run_push(j, work, assign_only))
         return job.as_dict()
 
     async def _run_push(
-        self, job: VaultJob, work: list[tuple[str, dict[str, Any], ScannerRef]]
+        self, job: VaultJob, work: list[tuple[str, dict[str, Any], ScannerRef]],
+        assign_only: list[tuple[str, dict[str, Any], ScannerRef]] | None = None,
     ) -> None:
         job.phase = "running"
 
@@ -702,13 +729,17 @@ class VaultJobManager:
         # ONCE. Assigning after each template cost four more requests per fingerprint —
         # read the list, write it back, and re-read both the list and the fingerprint
         # list for the snapshot, the last a full RS-485 round trip — none of which the
-        # next template needs. Order within a scanner is the order of `work`.
-        by_scanner: dict[str, tuple[ScannerRef, list[tuple[str, dict[str, Any]]]]] = {}
+        # next template needs. Order within a scanner is the order of `work`. Templates
+        # already on the sensor but unassigned join the same single user-list write.
+        by_scanner: dict[str, tuple[ScannerRef, list[tuple[str, dict[str, Any]]],
+                                    list[tuple[str, dict[str, Any]]]]] = {}
         for apid, record, ref in work:
-            by_scanner.setdefault(ref.entry_id, (ref, []))[1].append((apid, record))
+            by_scanner.setdefault(ref.entry_id, (ref, [], []))[1].append((apid, record))
+        for apid, record, ref in assign_only or []:
+            by_scanner.setdefault(ref.entry_id, (ref, [], []))[2].append((apid, record))
 
         index = 0
-        for ref, pairs in by_scanner.values():
+        for ref, pairs, to_assign in by_scanner.values():
             written: list[tuple[str, dict[str, Any], JobItem]] = []
             try:
                 for apid, record in pairs:
@@ -719,6 +750,19 @@ class VaultJobManager:
                     item = await self._write_template(job, apid, record, ref, index)
                     if item is not None:
                         written.append((apid, record, item))
+                for apid, record in to_assign:
+                    if job.cancelling:
+                        job.cancelled = True
+                        break
+                    index += 1
+                    label = f"{record.get('username') or 'unknown'} · finger {record.get('finger')}"
+                    item = JobItem(
+                        apid=apid, label=label, state=STATE_OK, scanner=ref.title,
+                        entry_id=ref.entry_id,
+                        detail="already on the scanner with nobody named for it — assigned",
+                    )
+                    self._record(job, item)
+                    written.append((apid, record, item))
             finally:
                 # Also after a cancel: a template that is on the sensor opens the door,
                 # so it gets its owner even when the rest of the job was stopped.

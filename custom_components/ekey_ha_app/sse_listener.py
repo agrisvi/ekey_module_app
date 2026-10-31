@@ -14,6 +14,7 @@ from .const import (
     EVENT_FINGER_TOUCH,
     EVENT_FINGERPRINT_MATCHED,
     EVENT_FINGERPRINT_NOT_MATCHED,
+    EVENT_SESSION_RESET,
     MATCH_OK,
 )
 from .util import clean_json_string
@@ -220,6 +221,14 @@ class EkeySSEListener:
                     "state": state_name,
                     "enstat": enstat,
                 })
+
+        elif cmd == "NOTIFY_SESSION_RESET":
+            # Not from the scanner: the backend lost a frame and re-keyed the session,
+            # which also ended any enrollment on the scanner without a word.
+            _LOGGER.info(">>> Scanner session re-established on %s", self.scanner_id)
+            self.hass.bus.async_fire(EVENT_SESSION_RESET, {
+                "entry_id": self.entry_id, "scanner_id": self.scanner_id,
+            })
 
         else:
             _LOGGER.debug("Received unknown event: %s", cmd)
