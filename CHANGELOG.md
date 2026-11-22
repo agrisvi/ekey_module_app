@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.5
+
+- **Fixed: the panel said "The ekey module Daemon add-on is not running" while it was.**
+  With two copies of the add-on installed, the store's and a local build (a test
+  instance), the panel took the first one in the Supervisor's list. That was the store's,
+  which was stopped, so the running local build was never framed. It now picks the
+  running one, and only names a stopped one when none runs. (`www/ekey-panel.js`
+  `_ingressUrl()`, test in `tests/panel_render_test.mjs`)
+- **Fixed: a changed panel could keep running the old one from the browser cache.** The
+  panel's script URL only carried the integration version (`?v=1.3.4`), so a fixed
+  `ekey-panel.js` copied onto a host without a version bump kept the same URL, and the
+  browser went on using the cached old module. The URL now also carries a short hash
+  of the file's content (`?v=1.3.4-<hash>`), so it changes whenever the file does. The
+  version shown in the panel is unchanged. (`panel.py`, test in
+  `tests/ha_component/test_panel.py`)
+
 ## 1.3.4
 
 - **Fixed: a panel enrollment the scanner had abandoned kept saying "Reading the finger…"

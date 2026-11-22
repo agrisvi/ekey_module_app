@@ -9,13 +9,19 @@ deliberately no build step and no dependency on Home Assistant's bundled ``lit``
 the frontend's internal module paths are not a stable public interface, and a panel
 that breaks on a frontend update is worse than a plainer one that does not.
 
-``cache_headers=False`` is intentional. The URL carries the integration version as
-a query parameter for cache-busting, but a panel serving stale JavaScript after an
-update is a confusing failure to diagnose, and this file is a few tens of KB — not
-worth optimising at the cost of that.
+``cache_headers=False`` is intentional. The URL carries the integration version and
+a short hash of the module's content as a query parameter for cache-busting, but a
+panel serving stale JavaScript after an update is a confusing failure to diagnose,
+and this file is a few tens of KB — not worth optimising at the cost of that.
+
+The version alone is not enough: a fixed ``ekey-panel.js`` copied onto a host
+without a version bump (a test instance, a hotfix) kept the same URL, and the
+browser went on running the old module from its cache — the fix was on the server
+and still not in effect. The content hash changes the URL whenever the file does.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -44,6 +50,18 @@ _REGISTERED = "_panel_registered"
 # panel can stamp it onto things — a backup file records which build wrote it, and
 # "which version made this" is the first question about a file that will not load.
 PANEL_VERSION_KEY = "_panel_version"
+
+
+def _content_tag(path: Path) -> str | None:
+    """First 8 hex digits of the file's SHA-1, or None when it cannot be read.
+
+    Blocking file I/O: call it through the executor. Not a security use — it only
+    has to change when the file does.
+    """
+    try:
+        return hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()[:8]
+    except OSError:
+        return None
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
@@ -89,11 +107,18 @@ async def _async_register(
 
     domain_data[PANEL_VERSION_KEY] = version
 
+    # The cache key, not the version: the version stays as it is for display and for
+    # stamping backups, while the URL also follows the file's content.
+    tag = await hass.async_add_executor_job(
+        _content_tag, static_dir / PANEL_JS_URL.rsplit("/", 1)[-1]
+    )
+    cache_key = f"{version}-{tag}" if tag else version
+
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_URL_PATH,
         webcomponent_name=PANEL_COMPONENT_NAME,
-        module_url=f"{PANEL_JS_URL}?v={version}",
+        module_url=f"{PANEL_JS_URL}?v={cache_key}",
         sidebar_title=PANEL_TITLE,
         sidebar_icon=PANEL_ICON,
         # Everything this panel does is administration: enrolling a finger is

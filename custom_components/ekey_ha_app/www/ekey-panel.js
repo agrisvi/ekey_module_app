@@ -451,8 +451,13 @@ class EkeyPanel extends HTMLElement {
         "computer, so the page cannot be opened from here. Start the daemon with " +
         "-b 0.0.0.0 and set this entry's host to the machine's network address.");
     }
-    const addon = ((list && list.addons) || []).find((a) =>
+    /* More than one can be installed: the store's and a local build of the same add-on
+       (a developer's test instance). Only one runs, since both need port 8080 and the
+       scanner, so frame the running one; the first match only decides which stopped one
+       the error below names. */
+    const candidates = ((list && list.addons) || []).filter((a) =>
       a.slug === "ekey_ha_daemon" || String(a.slug || "").endsWith("_ekey_ha_daemon"));
+    const addon = candidates.find((a) => a.state === "started") || candidates[0];
     if (!addon) {
       throw new Error("This scanner is a daemon at 127.0.0.1, but the ekey module Daemon " +
         "add-on is not installed, so it is a daemon running on this machine directly. " +

@@ -1197,6 +1197,34 @@ console.log("scanner page:");
   }
 
   {
+    const infos = [];
+    const p = page(ADDON, async (msg) => {
+      if (msg.endpoint === "/addons") {
+        return { addons: [
+          { slug: "759c6ff4_ekey_ha_daemon", state: "stopped" },
+          { slug: "local_ekey_ha_daemon", state: "started" },
+        ] };
+      }
+      if (msg.endpoint.endsWith("/info")) {
+        infos.push(msg.endpoint);
+        return msg.endpoint === "/addons/local_ekey_ha_daemon/info"
+          ? { state: "started", ingress_url: "/api/hassio_ingress/LOCAL/" }
+          : { state: "stopped", ingress_url: "/api/hassio_ingress/STORE/" };
+      }
+      if (msg.endpoint === "/ingress/session") return { session: "S2" };
+      return {};
+    });
+    window.location = { protocol: "http:" };
+    await p._openPage();
+    check("with the store add-on stopped and a local build running, the running one opens",
+      p._page.url === "/api/hassio_ingress/LOCAL/");
+    check("and the stopped one is not asked about",
+      infos.length === 1 && infos[0] === "/addons/local_ekey_ha_daemon/info");
+    p._stopIngress();
+    delete window.location;
+  }
+
+  {
     const p = page(ADDON, async () => { throw new Error("unknown command"); });
     await p._openPage();
     check("without a Supervisor the reason is given",
